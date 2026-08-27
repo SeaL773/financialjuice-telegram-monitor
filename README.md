@@ -187,6 +187,7 @@ All configuration is supplied through environment variables (see
 | `FJ_COOKIES_PATH` | no | `data/cookies.json` | Persisted FinancialJuice session cookies |
 | `FJ_WS_RECONNECT_BASE_DELAY` | no | `3` | Initial WebSocket retry delay (seconds) |
 | `FJ_WS_RECONNECT_MAX_DELAY` | no | `60` | Maximum WebSocket retry delay (seconds) |
+| `FJ_WS_RECEIVE_TIMEOUT` | no | `180` | Reconnect when no WebSocket protocol frame is received within this many seconds |
 | `FJ_POLL_FALLBACK_INTERVAL` | no | `15` | Polling interval while the socket is unhealthy (seconds) |
 | `FJ_FEEDTOKEN_REFRESH_HOURS` | no | `6` | `/home` feed token refresh interval (hours) |
 
