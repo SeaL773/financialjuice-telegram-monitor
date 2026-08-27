@@ -69,6 +69,9 @@ def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
     return value
 
 
+WS_RECEIVE_TIMEOUT = _env_float("FJ_WS_RECEIVE_TIMEOUT", 180.0, minimum=1.0)
+
+
 def _env_json_object(name: str) -> dict[str, object]:
     raw = os.environ.get(name, "").strip()
     if not raw:
