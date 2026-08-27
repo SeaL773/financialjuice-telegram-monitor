@@ -1,14 +1,6 @@
 import importlib
-import sys
-import types
+import asyncio
 import unittest
-
-fake_aiohttp = types.ModuleType("aiohttp")
-setattr(fake_aiohttp, "ClientSession", lambda: None)
-setattr(fake_aiohttp, "WSMsgType", types.SimpleNamespace(
-    TEXT="TEXT", ERROR="ERROR", CLOSE="CLOSE", CLOSED="CLOSED", CLOSING="CLOSING"
-))
-sys.modules.setdefault("aiohttp", fake_aiohttp)
 
 ws_client = importlib.import_module("src.api.ws_client")
 
@@ -41,6 +33,23 @@ class NegotiationValidationTestCase(unittest.TestCase):
         ):
             with self.assertRaises(ws_client.WSConnectionError):
                 guard()
+
+
+class SignalRReceiveTestCase(unittest.IsolatedAsyncioTestCase):
+    async def test_stale_receive_raises_connection_error(self):
+        class StaleWebSocket:
+            closed = False
+
+            async def receive(self):
+                await asyncio.Event().wait()
+
+        client = ws_client.FJSignalRClient(
+            {}, "feed", session=None, receive_timeout=0.01
+        )
+        client._ws = StaleWebSocket()
+
+        with self.assertRaisesRegex(ws_client.WSConnectionError, "No SignalR frame"):
+            await anext(client.listen())
 
 
 if __name__ == "__main__":

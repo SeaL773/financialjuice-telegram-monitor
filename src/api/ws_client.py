@@ -1,5 +1,6 @@
 import json
 import importlib
+import asyncio
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -35,6 +36,8 @@ class _WebSocket(Protocol):
     def __aiter__(self) -> AsyncIterator[_WSMessage]: ...
 
     async def close(self) -> object: ...
+
+    async def receive(self) -> _WSMessage: ...
 
     def exception(self) -> BaseException | None: ...
 
@@ -91,6 +94,8 @@ class FJSignalRClient:
         cookies: dict[str, str],
         feedtoken: str,
         session: Optional[_Session] = None,
+        receive_timeout: float = 180.0,
+        on_activity: Optional[Callable[[], None]] = None,
     ):
         self.cookies = cookies
         self.feedtoken = feedtoken
@@ -101,6 +106,8 @@ class FJSignalRClient:
         self._connection_token: Optional[str] = None
         self._redirect_url: Optional[str] = None
         self._tab_id = str(uuid.uuid4())
+        self._receive_timeout = receive_timeout
+        self._on_activity = on_activity
 
     async def __aenter__(self) -> "FJSignalRClient":
         if self._session is None:
@@ -267,13 +274,24 @@ class FJSignalRClient:
     async def listen(self) -> AsyncIterator[list[dict[str, Any]]]:
         if self._ws is None:
             raise RuntimeError("listen() before connect()")
-        async for msg in self._ws:
+        ws = self._ws
+        while not ws.closed:
+            try:
+                msg = await asyncio.wait_for(
+                    ws.receive(), timeout=self._receive_timeout
+                )
+            except asyncio.TimeoutError as exc:
+                raise WSConnectionError(
+                    f"No SignalR frame received for {self._receive_timeout:g}s"
+                ) from exc
             if msg.type == _WS_TEXT:
                 items = self._parse_frame(msg.data)
+                if self._on_activity is not None:
+                    self._on_activity()
                 if items:
                     yield items
             elif msg.type == _WS_ERROR:
-                raise WSConnectionError(f"WS error frame: {self._ws.exception()}")
+                raise WSConnectionError(f"WS error frame: {ws.exception()}")
             elif msg.type in (_WS_CLOSE, _WS_CLOSED, _WS_CLOSING):
                 raise WSConnectionError("WS closed by server")
 

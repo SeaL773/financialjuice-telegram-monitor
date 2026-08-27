@@ -1,6 +1,7 @@
+import asyncio
 import json
 import importlib
-from collections.abc import AsyncIterator, Awaitable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from types import ModuleType
 from typing import Any, Optional, Protocol
 
@@ -63,11 +64,15 @@ class CentrifugoClient:
         ws_url: str,
         token: str,
         session: _Session,
+        receive_timeout: float = 180.0,
+        on_activity: Optional[Callable[[], None]] = None,
     ):
         self.ws_url: str = ws_url
         self.token: str = token
         self._session: _Session = session
         self._ws: Optional[_WebSocket] = None
+        self._receive_timeout = receive_timeout
+        self._on_activity = on_activity
 
     async def close(self) -> None:
         if self._ws is not None and not self._ws.closed:
@@ -95,7 +100,12 @@ class CentrifugoClient:
             }
         )
 
-        msg = await ws.receive()
+        try:
+            msg = await asyncio.wait_for(ws.receive(), timeout=self._receive_timeout)
+        except asyncio.TimeoutError as exc:
+            raise WSConnectionError(
+                f"No Centrifugo connect frame received for {self._receive_timeout:g}s"
+            ) from exc
         if msg.type == ws_text:
             data = self._parse_json(msg.data)
             error = data.get("error")
@@ -125,8 +135,16 @@ class CentrifugoClient:
 
         ws = self._ws
         ws_text, ws_error, ws_close, ws_closed, ws_closing = _ws_message_types()
-        async for msg in ws:
+        while not ws.closed:
+            try:
+                msg = await asyncio.wait_for(ws.receive(), timeout=self._receive_timeout)
+            except asyncio.TimeoutError as exc:
+                raise WSConnectionError(
+                    f"No Centrifugo frame received for {self._receive_timeout:g}s"
+                ) from exc
             if msg.type == ws_text:
+                if self._on_activity is not None:
+                    self._on_activity()
                 if msg.data == "{}":
                     await ws.send_str("{}")
                     continue

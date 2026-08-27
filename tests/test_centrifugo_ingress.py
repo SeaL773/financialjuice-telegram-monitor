@@ -1,8 +1,11 @@
 import json
+import asyncio
 import unittest
-from unittest.mock import patch
+from typing import Never
+from unittest.mock import Mock, patch
 
 from src.api.centrifugo_client import CentrifugoClient
+from src.api.ws_common import WSConnectionError
 
 
 class CentrifugoIngressTestCase(unittest.TestCase):
@@ -33,6 +36,46 @@ class CentrifugoIngressTestCase(unittest.TestCase):
 
         with patch("src.api.centrifugo_client.MAX_ITEMS_PER_PROCESS_BATCH", 1):
             self.assertEqual([], CentrifugoClient._parse_frame(self._frame([{}, {}])))
+
+
+class CentrifugoReceiveTestCase(unittest.IsolatedAsyncioTestCase):
+    async def test_stale_receive_raises_connection_error(self) -> None:
+        class StaleWebSocket:
+            closed: bool = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                raise StopAsyncIteration
+
+            async def close(self):
+                self.closed = True
+
+            async def send_json(self, data: object):
+                return None
+
+            async def send_str(self, data: str):
+                return None
+
+            async def receive(self) -> Never:
+                await asyncio.Event().wait()
+                raise AssertionError("unreachable")
+
+            def exception(self):
+                return None
+
+        session = Mock()
+        client = CentrifugoClient(
+            "wss://example.test",
+            "token",
+            session,
+            receive_timeout=0.01,
+        )
+        client._ws = StaleWebSocket()
+
+        with self.assertRaisesRegex(WSConnectionError, "No Centrifugo frame"):
+            await anext(client.listen())
 
 
 if __name__ == "__main__":
