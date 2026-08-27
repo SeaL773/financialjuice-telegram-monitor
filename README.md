@@ -1,25 +1,47 @@
-# financialjuice-telegram-monitor
+<div align="center">
+  <table>
+    <tr>
+      <td bgcolor="#242d38" align="center">
+        <a href="https://www.financialjuice.com/">
+          <img src="https://www.financialjuice.com/assets/images/FjLogo.svg" alt="FinancialJuice" width="390">
+        </a>
+      </td>
+    </tr>
+  </table>
+  <h1>Unofficial FinancialJuice → Telegram Monitor</h1>
+  <p><strong>Durable breaking-news alerts, same-ID revision updates, and optional bilingual delivery.</strong></p>
+  <p>
+    <img src="https://img.shields.io/badge/python-3.11-blue?logo=python&logoColor=white" alt="Python 3.11">
+    <img src="https://img.shields.io/badge/docker-ready-2496ED?logo=docker&logoColor=white" alt="Docker ready">
+    <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License">
+    <img src="https://img.shields.io/badge/translation-optional-54c7e2" alt="Optional translation">
+  </p>
+</div>
 
-![Python](https://img.shields.io/badge/python-3.11-blue?logo=python&logoColor=white)
-![Docker](https://img.shields.io/badge/docker-ready-2496ED?logo=docker&logoColor=white)
-![License](https://img.shields.io/badge/license-MIT-green)
+<img src="docs/assets/pipeline.svg" alt="FinancialJuice to Telegram processing pipeline">
 
-A headless watcher for [FinancialJuice](https://www.financialjuice.com) headlines. It
-follows the site's live Centrifugo feed, falls back to the legacy Azure SignalR
-channel and HTTP polling when the socket is unhealthy, catches breaking-news
-upgrades and same-ID editorial revisions, archives every accepted revision to
-disk, and posts to Telegram. An optional background worker translates English
-alerts to Chinese through any OpenAI-compatible Chat Completions API.
+This headless monitor follows FinancialJuice's live Centrifugo feed, retains a
+legacy Azure SignalR path, and falls back to bounded HTTP polling when sockets
+are unhealthy. It detects breaking upgrades and edits to an existing `NewsID`,
+archives every accepted revision, and updates Telegram without requiring a
+browser. Optional English-to-Chinese translation works with any
+OpenAI-compatible Chat Completions API.
 
 > **Not affiliated with FinancialJuice, Telegram, or any translation provider.**
 > This is an independent client that reads FinancialJuice's public feed and
 > republishes it; it does not publish back to FinancialJuice.
 > You are responsible for using it in accordance with the terms and policies of
 > every service you connect.
+>
+> FinancialJuice and its logo are trademarks of their respective owner. The
+> official logo above is loaded from FinancialJuice's public website and is used
+> only to identify the service this independent client connects to. See the
+> [FinancialJuice Terms of Service](https://www.financialjuice.com/tos.aspx).
 
 ## Contents
 
 - [Features](#features)
+- [Preview](#preview)
 - [How it works](#how-it-works)
 - [Reliability model](#reliability-model)
 - [Quick start](#quick-start)
@@ -58,26 +80,25 @@ response, oversized response, malformed response) the English alert is left
 exactly as published, and a stale translation job can never overwrite a newer
 English revision.
 
+## Preview
+
+<div align="center">
+  <img src="docs/assets/telegram-preview.svg" alt="Fictional bilingual Telegram alert preview" width="760">
+</div>
+
+The preview is generated for this repository and uses fictional content. Real
+messages contain the FinancialJuice source time, the latest accepted editorial
+revision, and a translation only when translation is explicitly enabled.
+
 ## How it works
 
-```text
-FinancialJuice login -> /home token discovery -> Centrifugo/SignalR feed
-                                                   |
-                                                   v
-                                      news_processor + durable state
-                                        |                      |
-                                        v                      v
-                              archive raw/breaking JSON   Telegram English alert
-                                                               |
-                                                               v
-                                                    translation queue_worker
-                                                               |
-                                                               v
-                                             OpenAI-compatible /chat/completions
-                                                               |
-                                                               v
-                                                 revision-guarded Telegram edit
-```
+| Stage | Responsibility |
+|---|---|
+| Feed ingress | Centrifugo first, SignalR compatibility path, polling after repeated WS failures |
+| Revision engine | Normalizes `NewsID`, fingerprints title/description, detects upgrades and edits |
+| Durable state | Persists accepted revisions, archive work, Telegram targets, and resume progress |
+| Telegram | Publishes English immediately, edits in place when possible, chunks long updates safely |
+| Translation | Runs in a bounded background queue and can never overwrite a newer English revision |
 
 ### Translation flow
 
@@ -212,6 +233,15 @@ Pick any base URL / model pair from an OpenAI-compatible provider:
 | DeepSeek | `https://api.deepseek.com/v1` | `deepseek-chat` |
 | OpenRouter | `https://openrouter.ai/api/v1` | `openai/gpt-4.1-mini` |
 | Local server | `http://host.docker.internal:8000/v1` | server-defined model ID |
+
+<details>
+<summary><strong>OpenRouter header example</strong></summary>
+
+```env
+FJ_TRANSLATE_HEADERS_JSON={"HTTP-Referer":"https://github.com/SeaL773/financialjuice-telegram-monitor","X-OpenRouter-Title":"financialjuice-telegram-monitor"}
+```
+
+</details>
 
 ## Project layout
 
