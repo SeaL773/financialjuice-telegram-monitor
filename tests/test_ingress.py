@@ -2,9 +2,15 @@ import html
 import json
 import importlib
 import unittest
-from unittest.mock import AsyncMock, Mock, PropertyMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
-from src.api.startup_client import _parse_startup_content, fetch_startup
+from src.api.startup_client import (
+    StartupAuthError,
+    StartupProtocolError,
+    StartupTransportError,
+    _parse_startup_content,
+    fetch_startup,
+)
 from src.core.security_limits import (
     MAX_ITEMS_PER_PROCESS_BATCH,
     MAX_STARTUP_EMBEDDED_JSON_BYTES,
@@ -16,6 +22,26 @@ from src.core.security_limits import (
 
 ws_parser = importlib.import_module("src.api.ws_parser")
 parse_signalr_frame = ws_parser.parse_signalr_frame
+
+
+def streaming_client(
+    *,
+    status_code: int = 200,
+    headers: dict[str, str] | None = None,
+    chunks: list[bytes] | None = None,
+):
+    response = Mock(status_code=status_code, headers=headers or {})
+
+    async def aiter_bytes():
+        for chunk in chunks or []:
+            yield chunk
+
+    response.aiter_bytes = aiter_bytes
+    context = Mock()
+    context.__aenter__ = AsyncMock(return_value=response)
+    context.__aexit__ = AsyncMock(return_value=None)
+    client = Mock(stream=Mock(return_value=context))
+    return client, response
 
 
 class WebSocketIngressTestCase(unittest.TestCase):
@@ -63,11 +89,76 @@ class WebSocketIngressTestCase(unittest.TestCase):
 
 class StartupIngressTestCase(unittest.IsolatedAsyncioTestCase):
     async def test_content_length_over_limit_rejected_before_content_access(self):
-        response = Mock(status_code=200, headers={"content-length": str(MAX_STARTUP_RESPONSE_BYTES + 1)})
-        type(response).content = PropertyMock(side_effect=AssertionError("must not access body"))
+        client, response = streaming_client(
+            headers={"content-length": str(MAX_STARTUP_RESPONSE_BYTES + 1)}
+        )
+        response.aiter_bytes = Mock(side_effect=AssertionError("must not iterate body"))
+        with self.assertRaises(StartupProtocolError):
+            await fetch_startup(client, {}, "info")
+
+    async def test_startup_failures_are_classified(self):
         client = Mock()
-        client.get = AsyncMock(return_value=response)
+        for status, error_type in (
+            (401, StartupAuthError),
+            (403, StartupAuthError),
+            (500, StartupTransportError),
+        ):
+            with self.subTest(status=status):
+                client, _ = streaming_client(status_code=status)
+                with self.assertRaises(error_type):
+                    await fetch_startup(client, {}, "info")
+
+        context = Mock()
+        context.__aenter__ = AsyncMock(
+            side_effect=__import__("httpx").ConnectError("offline")
+        )
+        context.__aexit__ = AsyncMock(return_value=None)
+        client = Mock(stream=Mock(return_value=context))
+        with self.assertRaises(StartupTransportError):
+            await fetch_startup(client, {}, "info")
+
+        client, _ = streaming_client(chunks=[b"not xml"])
+        with self.assertRaises(StartupProtocolError):
+            await fetch_startup(client, {}, "info")
+
+    async def test_auth_status_precedes_content_length_validation(self):
+        client, response = streaming_client(
+            status_code=401,
+            headers={"content-length": str(MAX_STARTUP_RESPONSE_BYTES + 1)},
+        )
+        response.aiter_bytes = Mock(side_effect=AssertionError("must not iterate body"))
+
+        with self.assertRaises(StartupAuthError):
+            await fetch_startup(client, {}, "info")
+
+    async def test_successful_empty_startup_response_is_not_an_error(self):
+        client, _ = streaming_client()
         self.assertEqual([], await fetch_startup(client, {}, "info"))
+
+    async def test_redirect_is_auth_error(self):
+        client, _ = streaming_client(status_code=302, headers={"location": "/login"})
+        with self.assertRaises(StartupAuthError):
+            await fetch_startup(client, {}, "info")
+
+    async def test_chunked_overflow_stops_iteration_at_limit(self):
+        yielded = 0
+
+        async def chunks():
+            nonlocal yielded
+            for chunk in (b"x" * MAX_STARTUP_RESPONSE_BYTES, b"y", b"unread"):
+                yielded += 1
+                yield chunk
+
+        response = Mock(status_code=200, headers={})
+        response.aiter_bytes = chunks
+        context = Mock()
+        context.__aenter__ = AsyncMock(return_value=response)
+        context.__aexit__ = AsyncMock(return_value=None)
+        client = Mock(stream=Mock(return_value=context))
+
+        with self.assertRaises(StartupProtocolError):
+            await fetch_startup(client, {}, "info")
+        self.assertEqual(2, yielded)
 
     def test_content_and_embedded_json_limits(self):
         with self.assertRaises(ValueError):

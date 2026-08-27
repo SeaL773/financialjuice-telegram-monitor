@@ -11,8 +11,6 @@ from src.core.security_limits import (
     MAX_STARTUP_RESPONSE_BYTES,
     MAX_WS_ITEM_SERIALIZED_BYTES,
 )
-from src.utils.LoggerManager import logger
-
 FJ_HOME_URL = "https://www.financialjuice.com/home"
 FJ_STARTUP_URL = "https://live.financialjuice.com/FJService.asmx/Startup"
 USER_AGENT = (
@@ -22,7 +20,23 @@ USER_AGENT = (
 )
 
 
-class StartupIngressError(ValueError):
+class StartupError(Exception):
+    """Base class for failures contacting or decoding the Startup endpoint."""
+
+
+class StartupAuthError(StartupError):
+    pass
+
+
+class StartupTransportError(StartupError):
+    pass
+
+
+class StartupProtocolError(StartupError, ValueError):
+    pass
+
+
+class StartupIngressError(StartupProtocolError):
     pass
 
 
@@ -70,8 +84,7 @@ async def fetch_startup(
     info: str,
 ) -> List[Dict[str, Any]]:
     if not info:
-        logger.warning("fetch_startup called with empty info token")
-        return []
+        raise StartupAuthError("Startup info token is empty")
 
     local_now = datetime.now(timezone.utc).astimezone()
     utc_offset = local_now.utcoffset()
@@ -89,31 +102,42 @@ async def fetch_startup(
     }
 
     try:
-        r = await client.get(
+        async with client.stream(
+            "GET",
             FJ_STARTUP_URL,
             params=params,
             cookies=cookies,
             headers={"Referer": "https://www.financialjuice.com/"},
-        )
-        content_length = r.headers.get("content-length")
-        if content_length is not None:
-            try:
-                declared_length = int(content_length)
-            except ValueError:
-                raise StartupIngressError("Invalid Startup Content-Length")
-            if declared_length > MAX_STARTUP_RESPONSE_BYTES:
-                raise StartupIngressError(
-                    f"Startup Content-Length={declared_length} limit={MAX_STARTUP_RESPONSE_BYTES}"
-                )
-        if r.status_code != 200:
-            logger.warning(f"Startup API error: {r.status_code}")
-            return []
-        content = r.content
+        ) as r:
+            if r.status_code in (401, 403) or 300 <= r.status_code < 400:
+                raise StartupAuthError(f"Startup authentication failed: {r.status_code}")
+            if r.status_code != 200:
+                raise StartupTransportError(f"Startup HTTP status: {r.status_code}")
+            content_length = r.headers.get("content-length")
+            if content_length is not None:
+                try:
+                    declared_length = int(content_length)
+                except ValueError:
+                    raise StartupIngressError("Invalid Startup Content-Length")
+                if declared_length > MAX_STARTUP_RESPONSE_BYTES:
+                    raise StartupIngressError(
+                        f"Startup Content-Length={declared_length} "
+                        f"limit={MAX_STARTUP_RESPONSE_BYTES}"
+                    )
+            chunks: list[bytes] = []
+            received = 0
+            async for chunk in r.aiter_bytes():
+                received += len(chunk)
+                if received > MAX_STARTUP_RESPONSE_BYTES:
+                    raise StartupIngressError(
+                        f"Startup response bytes>{MAX_STARTUP_RESPONSE_BYTES}"
+                    )
+                chunks.append(chunk)
+            content = b"".join(chunks)
         return _parse_startup_content(content)
-
-    except StartupIngressError as e:
-        logger.warning(f"Startup ingress rejected: {e}")
-        return []
-    except Exception as e:
-        logger.error(f"Startup fetch error: {type(e).__name__}: {e}")
-        return []
+    except StartupError:
+        raise
+    except httpx.HTTPError as exc:
+        raise StartupTransportError(f"Startup request failed: {exc}") from exc
+    except (ET.ParseError, json.JSONDecodeError, UnicodeError, TypeError) as exc:
+        raise StartupProtocolError(f"Invalid Startup response: {exc}") from exc
