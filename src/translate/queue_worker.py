@@ -15,6 +15,7 @@ class TranslationJob:
     source_time: str
     prefix: str
     apply_translation: Callable[[str, int, int, str], Awaitable[bool]]
+    finish_attempt: Optional[Callable[[str, int, int, bool], None]] = None
 
 
 class TranslationQueueWorker:
@@ -65,28 +66,32 @@ class TranslationQueueWorker:
                 logger.error(f"Translation worker handler error: {type(e).__name__}: {e}")
 
     async def _handle(self, job: TranslationJob) -> None:
-        translated = await translate(job.original_text)
-        if not translated:
-            logger.info(f"Skip edit (no translation) for msg_id={job.message_id}")
-            return
-
-        plain_text = _render_bilingual_text(
-            prefix=job.prefix,
-            original=job.original_text,
-            translated=translated,
-            source_time=job.source_time,
-        )
-        applied = await job.apply_translation(
-            job.news_id, job.revision, job.message_id, plain_text
-        )
-        if applied:
-            logger.info(
-                f"✏️  Published translation for news_id={job.news_id} revision={job.revision}"
+        applied = False
+        try:
+            translated = await translate(job.original_text)
+            if not translated:
+                logger.info(f"Skip edit (no translation) for msg_id={job.message_id}")
+                return
+            plain_text = _render_bilingual_text(
+                prefix=job.prefix,
+                original=job.original_text,
+                translated=translated,
+                source_time=job.source_time,
             )
-        else:
-            logger.info(
-                f"Skip stale or failed translation for news_id={job.news_id} revision={job.revision}"
+            applied = await job.apply_translation(
+                job.news_id, job.revision, job.message_id, plain_text
             )
+            if applied:
+                logger.info(
+                    f"✏️  Published translation for news_id={job.news_id} revision={job.revision}"
+                )
+            else:
+                logger.info(
+                    f"Skip stale or failed translation for news_id={job.news_id} revision={job.revision}"
+                )
+        finally:
+            if job.finish_attempt is not None:
+                job.finish_attempt(job.news_id, job.revision, job.message_id, applied)
 
 
 def _render_bilingual_text(prefix: str, original: str, translated: str, source_time: str) -> str:

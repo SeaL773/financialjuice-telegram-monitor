@@ -12,9 +12,13 @@ from src.archive.storage import (
     save_json_state,
     save_news_items_batch,
 )
-from src.core.config import DATA_DIR, TRANSLATE_ENABLED
+from src.core.config import DATA_DIR, TELEGRAM_RICH_MESSAGES_ENABLED, TRANSLATE_ENABLED
 from src.core.security_limits import MAX_ITEMS_PER_PROCESS_BATCH
-from src.telegram.bot import tg_edit_message, tg_send_group_resumable as tg_send_group
+from src.telegram.bot import (
+    tg_edit_message,
+    tg_send_group_resumable as tg_send_group,
+    tg_send_rich_message,
+)
 from src.telegram.rendering import (
     MAX_RENDERED_HTML_LENGTH,
     MAX_TELEGRAM_CHUNKS,
@@ -26,7 +30,7 @@ from src.telegram.rendering import (
 from src.translate.queue_worker import TranslationJob
 from src.utils.LoggerManager import logger
 
-STATE_VERSION = 4
+STATE_VERSION = 5
 MAX_STATE_ENTRIES = 5000
 TRIMMED_STATE_ENTRIES = 2000
 MAX_NEWS_ID_LENGTH = 128
@@ -56,6 +60,7 @@ ALLOWED_PENDING_GROUP_KINDS = {
     "english_update",
     "translation",
 }
+PENDING_RICH_KEYS = {"revision", "digest", "title", "description", "source_time"}
 
 FIELD_LIMITS = {
     "news_id": MAX_NEWS_ID_LENGTH,
@@ -292,6 +297,43 @@ def _validate_pending_group(value: Any) -> Optional[Dict[str, Any]]:
     }
 
 
+def _validate_pending_rich(value: Any) -> Optional[Dict[str, Any]]:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != PENDING_RICH_KEYS:
+        return None
+    revision = value.get("revision")
+    if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
+        return None
+    digest = value.get("digest")
+    if not isinstance(digest, str) or len(digest) != 64 or any(
+        char not in "0123456789abcdef" for char in digest.lower()
+    ):
+        return None
+    raw_title = value.get("title")
+    raw_description = value.get("description")
+    raw_source_time = value.get("source_time")
+    if (
+        not isinstance(raw_title, str)
+        or not isinstance(raw_description, str)
+        or not isinstance(raw_source_time, str)
+    ):
+        return None
+    title = raw_title
+    description = raw_description
+    source_time = raw_source_time
+    expected = hashlib.sha256(
+        "\0".join((title, description, source_time)).encode("utf-8")
+    ).hexdigest()
+    if digest != expected:
+        return None
+    return dict(value)
+
+
+def _rich_digest(title: str, description: str, source_time: str) -> str:
+    return hashlib.sha256("\0".join((title, description, source_time)).encode("utf-8")).hexdigest()
+
+
 def _is_breaking(level: str, breaking: bool) -> bool:
     return breaking or "active" in level
 
@@ -324,6 +366,7 @@ class NewsProcessor:
         self._state_repaired = False
         self._state_path = state_path or os.path.join(DATA_DIR, "news_processor_state.json")
         self._data_dir = DATA_DIR if state_path is None else os.path.dirname(self._state_path)
+        self._translation_enqueued: set[tuple[str, int, int, str]] = set()
         state_existed = os.path.exists(self._state_path)
         self._state: Dict[str, Dict[str, Any]] = self._load_state()
         if not state_existed:
@@ -392,6 +435,11 @@ class NewsProcessor:
                 "raw_archive_pending": [],
                 "breaking_archive_pending": [],
                 "pending_group": None,
+                "pending_rich": None,
+                "telegram_mode": "classic",
+                "translation_revision": 0,
+                "translation_message_id": None,
+                "translation_status": "disabled",
                 "last_seen_seq": 0,
             }
             if nid not in latest and len(latest) >= MAX_STATE_ENTRIES:
@@ -517,6 +565,11 @@ class NewsProcessor:
             if repaired_pending_group:
                 logger.warning(f"Discard invalid pending Telegram group news_id={nid}")
                 self._state_repaired = True
+            pending_rich_raw = raw_state.get("pending_rich")
+            pending_rich = _validate_pending_rich(pending_rich_raw)
+            if pending_rich_raw is not None and pending_rich is None:
+                logger.warning(f"Discard invalid pending Telegram rich message news_id={nid}")
+                self._state_repaired = True
             level = _bounded_metadata(raw_state.get("level"), MAX_LEVEL_LENGTH)
             source_method = _bounded_metadata(
                 raw_state.get("source_method"), MAX_SOURCE_METHOD_LENGTH
@@ -563,8 +616,50 @@ class NewsProcessor:
                 "raw_archive_pending": raw_pending,
                 "breaking_archive_pending": breaking_pending,
                 "pending_group": pending_group,
+                "pending_rich": pending_rich,
+                "telegram_mode": raw_state.get("telegram_mode", "classic"),
+                "translation_revision": _safe_nonnegative_int(raw_state.get("translation_revision", 0)),
+                "translation_message_id": raw_state.get("translation_message_id"),
+                "translation_status": raw_state.get(
+                    "translation_status", "pending" if TRANSLATE_ENABLED else "disabled"
+                ),
                 "last_seen_seq": _safe_nonnegative_int(raw_state.get("last_seen_seq", 0)),
             }
+            if not isinstance(candidate_state["telegram_mode"], str) or candidate_state["telegram_mode"] not in {"classic", "rich"}:
+                logger.warning(f"Discard invalid Telegram mode news_id={nid}")
+                self._state_repaired = True
+                continue
+            if not isinstance(candidate_state["translation_status"], str) or candidate_state["translation_status"] not in {"pending", "applied", "disabled"}:
+                logger.warning(f"Discard invalid translation status news_id={nid}")
+                self._state_repaired = True
+                continue
+            translation_message_id = candidate_state["translation_message_id"]
+            if translation_message_id is not None and (
+                not isinstance(translation_message_id, int)
+                or isinstance(translation_message_id, bool)
+                or translation_message_id <= 0
+            ):
+                logger.warning(f"Discard invalid translation message ID news_id={nid}")
+                continue
+            if candidate_state["translation_status"] == "applied" and (
+                candidate_state["translation_revision"] != revision
+                or translation_message_id is None
+                or primary_message_id is None
+                or translation_message_id != primary_message_id
+            ):
+                logger.warning(f"Discard inconsistent translation marker news_id={nid}")
+                self._state_repaired = True
+                continue
+            if candidate_state["translation_status"] == "pending" and (
+                candidate_state["translation_revision"] != revision
+                or translation_message_id is None
+            ):
+                candidate_state["translation_revision"] = revision
+                candidate_state["translation_message_id"] = primary_message_id
+                if primary_message_id is None:
+                    candidate_state["translation_status"] = "disabled"
+            if not TRANSLATE_ENABLED and candidate_state["translation_status"] == "pending":
+                candidate_state["translation_status"] = "disabled"
             candidate_pending = [*raw_pending, *breaking_pending]
             candidate_pending_count = len(candidate_pending)
             candidate_pending_bytes = _serialized_bytes(candidate_pending)
@@ -615,9 +710,14 @@ class NewsProcessor:
             state.get("raw_archive_pending")
             or state.get("breaking_archive_pending")
             or state.get("pending_group")
+            or state.get("pending_rich")
             or (
                 state.get("alert_recorded")
                 and int(state.get("notification_revision", 0)) < int(state.get("revision", 0))
+            )
+            or (
+                state.get("translation_status") == "pending"
+                and state.get("translation_revision") == state.get("revision")
             )
         )
 
@@ -905,7 +1005,18 @@ class NewsProcessor:
                 f"input_length={len(original)} limit={MAX_TRANSLATION_INPUT_LENGTH}"
             )
             return
-        self._translator.submit(
+        revision = state["revision"]
+        key = (nid, revision, message_id, state["fingerprint"])
+        if state.get("translation_status") == "applied" and state.get("translation_revision") == revision:
+            return
+        if key in self._translation_enqueued:
+            return
+        if state.get("translation_revision") != revision or state.get("translation_status") != "pending":
+            state["translation_revision"] = revision
+            state["translation_message_id"] = message_id
+            state["translation_status"] = "pending"
+            self._persist()
+        submitted = self._translator.submit(
             TranslationJob(
                 news_id=nid,
                 revision=state["revision"],
@@ -914,8 +1025,19 @@ class NewsProcessor:
                 source_time=state["source_time"],
                 prefix=state["prefix"],
                 apply_translation=self.apply_translated_revision,
+                finish_attempt=self._finish_translation_attempt,
             )
         )
+        if submitted:
+            self._translation_enqueued.add(key)
+
+    def _finish_translation_attempt(
+        self, nid: str, revision: int, message_id: int, applied: bool
+    ) -> None:
+        self._translation_enqueued = {
+            key for key in self._translation_enqueued
+            if key != (nid, revision, message_id, self._state.get(nid, {}).get("fingerprint"))
+        }
 
     async def _send_complete(
         self, nid: str, state: Dict[str, Any], revision: int, kind: str, text: str, label: str
@@ -930,6 +1052,7 @@ class NewsProcessor:
         state["telegram_message_id"] = message_ids[0]
         state["telegram_is_group"] = len(message_ids) > 1
         state["telegram_revision"] = revision
+        state["telegram_mode"] = "classic"
         state["alert_recorded"] = True
 
     async def apply_translated_revision(
@@ -962,9 +1085,13 @@ class NewsProcessor:
             if (
                 not state.get("telegram_is_group")
                 and len(chunks) == 1
+                and state.get("telegram_mode", "classic") == "classic"
                 and await tg_edit_message(message_id, chunks[0])
             ):
                 state["telegram_revision"] = revision
+                state["translation_status"] = "applied"
+                state["translation_revision"] = revision
+                state["translation_message_id"] = message_id
                 self._persist()
                 return True
 
@@ -982,6 +1109,14 @@ class NewsProcessor:
             )
             if not message_ids:
                 return False
+            state["translation_status"] = "applied"
+            state["translation_revision"] = revision
+            state["translation_message_id"] = state.get("telegram_message_id")
+            self._persist()
+            self._translation_enqueued = {
+                key for key in self._translation_enqueued
+                if not (key[0] == _news_id(news_id) and key[1] == revision)
+            }
             return True
 
     async def _notify_new_breaking(self, nid: str, state: Dict[str, Any], upgraded: bool) -> None:
@@ -989,15 +1124,47 @@ class NewsProcessor:
         state["prefix"] = prefix
         state["notification_kind"] = "upgrade" if upgraded else "breaking"
         try:
-            text = _english_text(prefix, state)
-            message_ids = await self._send_complete(
-                nid,
-                state,
-                state["revision"],
-                "english_upgrade" if upgraded else "english_breaking",
-                text,
-                "UPGRADED" if upgraded else "BREAKING",
-            )
+            if not upgraded and TELEGRAM_RICH_MESSAGES_ENABLED:
+                title = normalize_upstream_html(state["title"])
+                description = normalize_upstream_html(state["description"])
+                source_time = state["source_time"]
+                digest = _rich_digest(title, description, source_time)
+                pending_rich = state.get("pending_rich")
+                if not isinstance(pending_rich, dict) or pending_rich.get("digest") != digest:
+                    state["pending_rich"] = {
+                        "revision": state["revision"], "digest": digest,
+                        "title": title, "description": description, "source_time": source_time,
+                    }
+                    self._persist()
+                rich_result = await tg_send_rich_message(
+                    title, description, source_time,
+                )
+                if rich_result.message_id is not None:
+                    state["pending_rich"] = None
+                    state["telegram_mode"] = "rich"
+                    state["telegram_message_ids"] = [rich_result.message_id]
+                    state["telegram_message_id"] = rich_result.message_id
+                    state["telegram_is_group"] = False
+                    state["telegram_revision"] = state["revision"]
+                    state["alert_recorded"] = True
+                    state["notification_revision"] = state["revision"]
+                    self._persist()
+                    message_ids = [rich_result.message_id]
+                elif rich_result.fallback_classic:
+                    state["pending_rich"] = None
+                    self._persist()
+                    state["telegram_mode"] = "classic"
+                    text = _english_text(prefix, state)
+                    message_ids = await self._send_complete(nid, state, state["revision"], "english_breaking", text, "BREAKING")
+                else:
+                    return
+            else:
+                text = _english_text(prefix, state)
+                message_ids = await self._send_complete(
+                    nid, state, state["revision"],
+                    "english_upgrade" if upgraded else "english_breaking", text,
+                    "UPGRADED" if upgraded else "BREAKING",
+                )
         except TelegramRenderLimitError as exc:
             logger.warning(
                 f"Telegram render rejected news_id={nid} revision={state['revision']}: {exc}"
@@ -1041,10 +1208,12 @@ class NewsProcessor:
         if (
             not state.get("telegram_is_group")
             and len(chunks) == 1
+            and state.get("telegram_mode", "classic") == "classic"
             and await tg_edit_message(message_id, chunks[0])
         ):
             state["notification_revision"] = state["revision"]
             state["telegram_revision"] = state["revision"]
+            state["telegram_mode"] = "classic"
             self._persist()
             self._enqueue_translation(nid, state)
             return
@@ -1184,6 +1353,7 @@ class NewsProcessor:
                     "alert_recorded": False, "raw_archive_revision": 0,
                     "breaking_archive_revision": 0, "raw_archive_pending": [],
                     "breaking_archive_pending": [], "pending_group": None,
+                    "pending_rich": None,
                     "last_seen_seq": self._last_seen_seq + 1,
                 }
                 simulated[nid] = simulated_state
@@ -1209,6 +1379,10 @@ class NewsProcessor:
         previous_state = copy.deepcopy(old) if old is not None else None
         if content_changed:
             state = copy.deepcopy(simulated[nid])
+            state["translation_revision"] = 0
+            state["translation_message_id"] = None
+            state["translation_status"] = "disabled"
+            state["pending_rich"] = None
             pending_group = state.get("pending_group")
             if (
                 isinstance(pending_group, dict)
@@ -1275,7 +1449,14 @@ class NewsProcessor:
             isinstance(current_pending_group, dict)
             and current_pending_group.get("kind") == "translation"
         )
-        if not content_changed and not upgraded and not pending_notification and not archive_pending:
+        translation_recovery = bool(
+            TRANSLATE_ENABLED and self._translator is not None
+            and state.get("alert_recorded")
+            and state.get("notification_revision") == state.get("revision")
+            and state.get("translation_status") != "applied"
+        )
+        pending_rich = bool(state.get("pending_rich"))
+        if not content_changed and not upgraded and not pending_notification and not archive_pending and not translation_recovery and not pending_rich:
             if pending_translation:
                 await self._resume_pending_translation(nid, state)
             return
@@ -1293,6 +1474,8 @@ class NewsProcessor:
             )
             self._flush_archives(nid, state)
             await self._notify_new_breaking(nid, state, upgraded=True)
+        elif pending_rich:
+            await self._notify_new_breaking(nid, state, upgraded=False)
         elif pending_notification:
             self._flush_archives(nid, state)
             await self._update_existing_message(nid, state)
@@ -1303,3 +1486,5 @@ class NewsProcessor:
             )
         else:
             self._flush_archives(nid, state)
+            if translation_recovery:
+                self._enqueue_translation(nid, state)
