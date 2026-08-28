@@ -93,6 +93,7 @@ def _env_string_headers(name: str) -> dict[str, str]:
 
 
 TRANSLATE_ENABLED = _env_bool("FJ_TRANSLATE_ENABLED", False)
+TELEGRAM_RICH_MESSAGES_ENABLED = _env_bool("FJ_TELEGRAM_RICH_MESSAGES_ENABLED", False)
 TRANSLATE_TIMEOUT = _env_float("FJ_TRANSLATE_TIMEOUT", 60.0, minimum=0.1)
 TRANSLATE_MAX_TOKENS = _env_int("FJ_TRANSLATE_MAX_TOKENS", 256, minimum=1)
 TRANSLATE_TEMPERATURE = _env_float("FJ_TRANSLATE_TEMPERATURE", 0.3, minimum=0.0)

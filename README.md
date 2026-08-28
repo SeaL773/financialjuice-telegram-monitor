@@ -170,6 +170,13 @@ Translation is opt-in. Set `FJ_TRANSLATE_ENABLED=true` only after configuring a
 provider you trust; the default is English-only and sends no news text to a
 translation service.
 
+Translation intent is stored with each delivered revision. If a task is lost or
+the option is enabled later, the next identical poll or restart retries the
+pending translation without repeatedly enqueueing it in one process. This is
+at-least-once behavior; an ambiguous provider/network result may require a retry.
+After changing `.env`, recreate the container with
+`docker compose up -d --force-recreate`.
+
 ## Configuration
 
 All configuration is supplied through environment variables (see
@@ -205,6 +212,7 @@ All configuration is supplied through environment variables (see
 | `FJ_TRANSLATE_HEADERS_JSON` | no | `{}` | JSON object of extra string-to-string headers |
 | `FJ_TRANSLATE_EXTRA_BODY_JSON` | no | `{}` | JSON object merged into the request body |
 | `FJ_TRANSLATE_PROMPT_FILE` | no | `src/translate/prompts/news_zh.md` | System prompt path |
+| `FJ_TELEGRAM_RICH_MESSAGES_ENABLED` | no | `false` | Experimental Bot API Rich Messages for simple one-message breaking alerts; long alerts and revisions use classic delivery |
 
 Header merge rules: custom header names are compared case-insensitively, and
 the first custom occurrence of a given name wins over later casing variants.
@@ -218,6 +226,14 @@ take precedence over matching keys in `FJ_TRANSLATE_EXTRA_BODY_JSON`.
 Translation responses are streamed with a finite 2 MiB cap: a declared
 oversized response is rejected before any body is read, and a chunked
 response stops being read the moment the accumulated limit is exceeded.
+
+The Rich Messages toggle uses Telegram's separate Bot API `sendRichMessage`
+endpoint, not the client application's Rich Text Editor. It is deliberately
+default-off and only sends controlled, escaped title/description/source-time
+fields. Unsupported or clearly invalid Rich API responses fall back to the
+classic path; timeouts, rate limits, server errors, or ambiguous responses stay
+retryable and are not immediately double-sent. Rich revisions/translations
+convert to classic replacement messages when editing Rich content is not used.
 
 `KIMI_API_KEY`, `KIMI_BASE_URL`, and `KIMI_MODEL` remain as deprecated aliases
 for existing deployments. Their `FJ_TRANSLATE_*` equivalents always take
