@@ -1,6 +1,7 @@
 """Telegram Bot API for sending news alerts."""
 
 import asyncio
+import html
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, List, Optional
 
@@ -12,6 +13,7 @@ from src.telegram.rendering import (
     MAX_TELEGRAM_CHUNKS,
     TELEGRAM_TEXT_LIMIT,
     TelegramRenderLimitError,
+    normalize_upstream_html,
 )
 from src.utils.LoggerManager import logger
 
@@ -25,6 +27,63 @@ class TelegramGroupResult:
     message_ids: List[int]
     next_chunk_index: int
     complete: bool
+
+
+@dataclass(frozen=True)
+class TelegramRichResult:
+    message_id: Optional[int]
+    fallback_classic: bool = False
+
+
+def build_rich_html(title: str, description: str, source_time: str) -> Optional[str]:
+    title_text = normalize_upstream_html(title)
+    description_text = normalize_upstream_html(description)
+    source_text = source_time.replace("\r", " ").replace("\n", " ").strip()
+    parts = [f"<h2>{html.escape(title_text)}</h2>"]
+    if description_text:
+        parts.append(f"<p>{html.escape(description_text).replace(chr(10), '<br>')}</p>")
+    parts.append(f"<footer>Source time: {html.escape(source_text)}</footer>")
+    result = "\n".join(parts)
+    return result if len(result.encode("utf-8")) <= 32768 else None
+
+
+async def tg_send_rich_message(title: str, description: str, source_time: str) -> TelegramRichResult:
+    if not TG_BOT_TOKEN or not TG_CHAT_ID:
+        return TelegramRichResult(None)
+    try:
+        rich_html = build_rich_html(title, description, source_time)
+    except TelegramRenderLimitError as exc:
+        logger.warning(f"TG rich message normalization rejected: {exc}")
+        return TelegramRichResult(None, fallback_classic=True)
+    if rich_html is None:
+        return TelegramRichResult(None, fallback_classic=True)
+    payload: dict[str, Any] = {
+        "chat_id": TG_CHAT_ID,
+        "rich_message": {"html": rich_html, "skip_entity_detection": True},
+    }
+    if TG_THREAD_ID:
+        payload["message_thread_id"] = TG_THREAD_ID
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{_TG_BASE}{TG_BOT_TOKEN}/sendRichMessage", json=payload, timeout=10
+            )
+            data = response.json()
+            if response.status_code == 200 and data.get("ok"):
+                message_id = data.get("result", {}).get("message_id")
+                if isinstance(message_id, int) and not isinstance(message_id, bool) and message_id > 0:
+                    return TelegramRichResult(message_id)
+                logger.warning("TG rich message returned an ambiguous success response")
+                return TelegramRichResult(None)
+            if response.status_code in {400, 404, 413}:
+                return TelegramRichResult(None, fallback_classic=True)
+            return TelegramRichResult(None)
+    except (httpx.TimeoutException, httpx.NetworkError) as exc:
+        logger.warning(f"TG rich message transport failure: {type(exc).__name__}: {exc}")
+        return TelegramRichResult(None)
+    except (ValueError, TypeError, KeyError) as exc:
+        logger.warning(f"TG rich message ambiguous response: {type(exc).__name__}: {exc}")
+        return TelegramRichResult(None)
 
 
 async def tg_send(text: str, important: bool = False) -> Optional[int]:
