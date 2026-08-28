@@ -20,6 +20,7 @@ from src.telegram.rendering import (
     MAX_TELEGRAM_CHUNKS,
     TELEGRAM_TEXT_LIMIT,
     TelegramRenderLimitError,
+    normalize_upstream_html,
     render_message_chunks,
 )
 from src.translate.queue_worker import TranslationJob
@@ -296,17 +297,21 @@ def _is_breaking(level: str, breaking: bool) -> bool:
 
 
 def _english_text(prefix: str, content: Dict[str, str]) -> str:
-    parts = [f"{prefix}{content['title']}"]
-    if content["description"]:
-        parts.append(content["description"])
+    title = normalize_upstream_html(content["title"])
+    description = normalize_upstream_html(content["description"])
+    parts = [f"{prefix}{title}"]
+    if description:
+        parts.append(description)
     parts.append(f"Source time: {content['source_time']}")
     return "\n\n".join(parts)
 
 
 def _translation_text(content: Dict[str, str]) -> str:
-    if content["description"]:
-        return f"{content['title']}\n\n{content['description']}"
-    return content["title"]
+    title = normalize_upstream_html(content["title"])
+    description = normalize_upstream_html(content["description"])
+    if description:
+        return f"{title}\n\n{description}"
+    return title
 
 
 class NewsProcessor:
@@ -885,7 +890,13 @@ class NewsProcessor:
 
     def _enqueue_translation(self, nid: str, state: Dict[str, Any]) -> None:
         message_id = state.get("telegram_message_id")
-        original = _translation_text(state)
+        try:
+            original = _translation_text(state)
+        except TelegramRenderLimitError as exc:
+            logger.warning(
+                f"Skip translation normalization news_id={nid} revision={state['revision']}: {exc}"
+            )
+            return
         if not TRANSLATE_ENABLED or self._translator is None or not message_id or not original:
             return
         if len(original) > MAX_TRANSLATION_INPUT_LENGTH:
@@ -977,8 +988,8 @@ class NewsProcessor:
         prefix = "🔺 UPGRADED\n" if upgraded else "🚨 BREAKING\n"
         state["prefix"] = prefix
         state["notification_kind"] = "upgrade" if upgraded else "breaking"
-        text = _english_text(prefix, state)
         try:
+            text = _english_text(prefix, state)
             message_ids = await self._send_complete(
                 nid,
                 state,
@@ -1001,8 +1012,8 @@ class NewsProcessor:
         message_id = state.get("telegram_message_id")
         if not message_id:
             if state.get("alert_recorded"):
-                replacement_text = _english_text("UPDATE\n", state)
                 try:
+                    replacement_text = _english_text("UPDATE\n", state)
                     message_ids = await self._send_complete(
                         nid, state, state["revision"], "english_update", replacement_text, "UPDATE"
                     )
@@ -1019,8 +1030,8 @@ class NewsProcessor:
                     nid, state, upgraded=state["notification_kind"] == "upgrade"
                 )
             return
-        text = _english_text(state["prefix"], state)
         try:
+            text = _english_text(state["prefix"], state)
             chunks = render_message_chunks(text, group_label="UPDATE")
         except TelegramRenderLimitError as exc:
             logger.warning(
@@ -1038,8 +1049,8 @@ class NewsProcessor:
             self._enqueue_translation(nid, state)
             return
 
-        replacement_text = _english_text("UPDATE\n", state)
         try:
+            replacement_text = _english_text("UPDATE\n", state)
             message_ids = await self._send_complete(
                 nid, state, state["revision"], "english_update", replacement_text, "UPDATE"
             )
