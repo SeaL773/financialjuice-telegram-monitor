@@ -337,6 +337,7 @@ class TranslationConfigTests(unittest.TestCase):
 
     CONFIG_NAMES: set[str] = {
         "FJ_TRANSLATE_API_KEY",
+        "FJ_TRANSLATE_API_KEY_FILE",
         "FJ_TRANSLATE_BASE_URL",
         "FJ_TRANSLATE_MODEL",
         "FJ_TRANSLATE_TIMEOUT",
@@ -403,9 +404,9 @@ class TranslationConfigTests(unittest.TestCase):
         )
         self.assertEqual(60.0, config.TRANSLATE_TIMEOUT)
         self.assertEqual(256, config.TRANSLATE_MAX_TOKENS)
-        self.assertEqual(0.3, config.TRANSLATE_TEMPERATURE)
+        self.assertEqual(0.6, config.TRANSLATE_TEMPERATURE)
         self.assertEqual({}, config.TRANSLATE_HEADERS)
-        self.assertEqual({}, config.TRANSLATE_EXTRA_BODY)
+        self.assertEqual({"thinking": {"type": "disabled"}}, config.TRANSLATE_EXTRA_BODY)
 
         config = self._reload_config(
             {
@@ -418,9 +419,12 @@ class TranslationConfigTests(unittest.TestCase):
         )
         self.assertEqual(10.5, config.TRANSLATE_TIMEOUT)
         self.assertEqual(512, config.TRANSLATE_MAX_TOKENS)
-        self.assertEqual(0.1, config.TRANSLATE_TEMPERATURE)
+        self.assertEqual(0.6, config.TRANSLATE_TEMPERATURE)
         self.assertEqual({"X-Test": "value"}, config.TRANSLATE_HEADERS)
-        self.assertEqual({"top_p": 0.9}, config.TRANSLATE_EXTRA_BODY)
+        self.assertEqual(
+            {"top_p": 0.9, "thinking": {"type": "disabled"}},
+            config.TRANSLATE_EXTRA_BODY,
+        )
 
 
 if __name__ == "__main__":
