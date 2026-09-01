@@ -1,11 +1,15 @@
 import json
 import math
 import os
+import sys
 from typing import cast
 
 from dotenv import load_dotenv
 
-_ = load_dotenv()
+# Never import production credentials into the unittest process. Tests provide
+# every required setting explicitly through patches or temporary environments.
+if "unittest" not in sys.modules:
+    _ = load_dotenv()
 
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "")
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "")
@@ -96,21 +100,49 @@ TRANSLATE_ENABLED = _env_bool("FJ_TRANSLATE_ENABLED", False)
 TELEGRAM_RICH_MESSAGES_ENABLED = _env_bool("FJ_TELEGRAM_RICH_MESSAGES_ENABLED", False)
 TRANSLATE_TIMEOUT = _env_float("FJ_TRANSLATE_TIMEOUT", 60.0, minimum=0.1)
 TRANSLATE_MAX_TOKENS = _env_int("FJ_TRANSLATE_MAX_TOKENS", 256, minimum=1)
-TRANSLATE_TEMPERATURE = _env_float("FJ_TRANSLATE_TEMPERATURE", 0.3, minimum=0.0)
+_configured_translate_temperature = _env_float(
+    "FJ_TRANSLATE_TEMPERATURE", 0.3, minimum=0.0
+)
 
 # KIMI_* variables are deprecated compatibility aliases. FJ_TRANSLATE_* wins.
 KIMI_API_KEY = os.environ.get("KIMI_API_KEY", "")
 KIMI_BASE_URL = os.environ.get("KIMI_BASE_URL", "")
 KIMI_MODEL = os.environ.get("KIMI_MODEL", "")
-TRANSLATE_API_KEY = os.environ.get("FJ_TRANSLATE_API_KEY", KIMI_API_KEY).strip()
+
+
+def _translation_api_key() -> str:
+    direct_key = os.environ.get("FJ_TRANSLATE_API_KEY", "").strip()
+    if direct_key:
+        return direct_key
+    key_file = os.environ.get("FJ_TRANSLATE_API_KEY_FILE", "").strip()
+    if key_file:
+        try:
+            with open(key_file, "r", encoding="utf-8") as file:
+                file_key = file.read().strip()
+            if file_key:
+                return file_key
+        except OSError:
+            pass
+    return KIMI_API_KEY.strip()
+
+
+TRANSLATE_API_KEY = _translation_api_key()
 TRANSLATE_BASE_URL = os.environ.get(
     "FJ_TRANSLATE_BASE_URL", KIMI_BASE_URL or "https://api.moonshot.cn/v1"
 ).strip() or "https://api.moonshot.cn/v1"
 TRANSLATE_MODEL = os.environ.get(
-    "FJ_TRANSLATE_MODEL", KIMI_MODEL or "moonshot-v1-8k"
-).strip() or "moonshot-v1-8k"
+    "FJ_TRANSLATE_MODEL", KIMI_MODEL or "kimi-k2.6"
+).strip() or "kimi-k2.6"
 TRANSLATE_HEADERS = _env_string_headers("FJ_TRANSLATE_HEADERS_JSON")
 TRANSLATE_EXTRA_BODY = _env_json_object("FJ_TRANSLATE_EXTRA_BODY_JSON")
+
+# Current Kimi models require temperature=0.6 and return the answer in
+# reasoning_content unless thinking is disabled.
+TRANSLATE_TEMPERATURE = (
+    0.6 if TRANSLATE_MODEL.startswith("kimi-") else _configured_translate_temperature
+)
+if TRANSLATE_MODEL.startswith("kimi-"):
+    _ = TRANSLATE_EXTRA_BODY.setdefault("thinking", {"type": "disabled"})
 
 TRANSLATE_PROMPT_FILE = os.environ.get(
     "FJ_TRANSLATE_PROMPT_FILE",

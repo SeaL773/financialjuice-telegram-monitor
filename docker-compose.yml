@@ -5,9 +5,14 @@ services:
     restart: unless-stopped
     volumes:
       - ./data:/app/data
+      - ${FJ_TRANSLATE_API_KEY_FILE_HOST:-/dev/null}:/run/secrets/cliproxy_api_key:ro
     env_file: .env
     environment:
       - TZ=America/New_York
+      - FJ_TRANSLATE_API_KEY_FILE=/run/secrets/cliproxy_api_key
+      - FJ_TRANSLATE_BASE_URL=${FJ_TRANSLATE_BASE_URL:-https://api.moonshot.cn/v1}
+      - FJ_TRANSLATE_MODEL=${FJ_TRANSLATE_MODEL:-kimi-k2.6}
+      - FJ_TRANSLATE_TEMPERATURE=${FJ_TRANSLATE_TEMPERATURE:-0.6}
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import os,sys,time; sys.exit(0 if os.path.exists('/tmp/healthcheck') and time.time()-os.path.getmtime('/tmp/healthcheck')<300 else 1)\""]
       interval: 60s
