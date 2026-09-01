@@ -434,16 +434,16 @@ class ProcessorTestCase(unittest.IsolatedAsyncioTestCase):
             "src.core.news_processor.save_news_items_batch", return_value=[{}]
         ) as archive_save:
             processor = NewsProcessor(state_path=self.state_path)
-            await processor.process([item(source_time="WS time")], source="WS")
+            await processor.process([item(source_time="10:00 01 January 2026")], source="WS")
             archive_save.reset_mock()
             await processor.process([{
-                **item(source_time="POLL time"),
+                **item(source_time="10:00:27 01 January 2026"),
                 "EURL": "https://example.test/poll",
                 "__ws_method__": "",
             }], source="POLL")
 
         self.assertEqual(1, processor._state["1"]["revision"])
-        self.assertEqual("POLL time", processor._state["1"]["source_time"])
+        self.assertEqual("10:00:27 01 January 2026", processor._state["1"]["source_time"])
         self.assertEqual("https://example.test/poll", processor._state["1"]["eurl"])
         self.assertEqual("POLL", processor._state["1"]["source_method"])
         edit.assert_not_awaited()

@@ -3,7 +3,11 @@ import copy
 import hashlib
 import json
 import os
+import math
+import re
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Protocol
+from zoneinfo import ZoneInfo
 
 from src.archive.storage import (
     load_daily_archive_records,
@@ -95,6 +99,120 @@ def _news_id(value: Any) -> str:
     return ""
 
 
+_TIME_RE = re.compile(r"(?<!\d)(\d{1,2}:\d{2}(?::\d{2})?)(?!\d)")
+_ISO_WITH_SECONDS_RE = re.compile(
+    r"[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})$"
+)
+_EPOCH_RE = re.compile(r"[+-]?\d+(?:\.\d+)?")
+_DATE_RE = re.compile(r"(?<!\d)(\d{1,2} [A-Za-z]+ \d{4})(?!\d)")
+_SOURCE_TIME_KEYS = ("DatePublished", "date", "timestamp", "PostedLong", "PostedShort")
+_ET = ZoneInfo("America/New_York")
+
+
+def _format_datetime(value: datetime) -> str:
+    return value.strftime("%H:%M:%S %d %B %Y")
+
+
+def _parse_upstream_timestamp(value: Any) -> Optional[str]:
+    """Format a reliable aware ISO/epoch instant in the archive's ET timezone."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        if not math.isfinite(value):
+            return None
+        timestamp = value / 1000 if abs(value) >= 100_000_000_000 else value
+        try:
+            parsed = datetime.fromtimestamp(timestamp, timezone.utc)
+            return _format_datetime(parsed.astimezone(_ET))
+        except (OverflowError, OSError, ValueError):
+            return None
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    if _EPOCH_RE.fullmatch(raw) is not None:
+        try:
+            return _parse_upstream_timestamp(float(raw))
+        except ValueError:
+            return None
+    if _ISO_WITH_SECONDS_RE.search(raw) is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return _format_datetime(parsed.astimezone(_ET))
+
+
+def _posted_time(value: Any) -> Optional[tuple[str, bool]]:
+    if not isinstance(value, str):
+        return None
+    match = _TIME_RE.search(value.strip())
+    if match is None:
+        return None
+    time_value = match.group(1)
+    has_seconds = time_value.count(":") == 2
+    time_format = "%H:%M:%S" if has_seconds else "%H:%M"
+    try:
+        normalized = datetime.strptime(time_value, time_format).strftime(time_format)
+    except ValueError:
+        return None
+    return normalized, has_seconds
+
+
+def _posted_date(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    date_match = _DATE_RE.search(raw)
+    if date_match is not None:
+        try:
+            return datetime.strptime(date_match.group(1), "%d %B %Y").strftime("%d %B %Y")
+        except ValueError:
+            return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.time() == datetime.min.time():
+        return parsed.strftime("%d %B %Y")
+    return None
+
+
+def _select_source_time(item: Dict[str, Any], previous: Dict[str, Any]) -> str:
+    for key in ("DatePublished", "date", "timestamp"):
+        if key in item:
+            parsed = _parse_upstream_timestamp(item.get(key))
+            if parsed is not None:
+                return parsed
+
+    posted_long = _safe_string(item.get("PostedLong")) if "PostedLong" in item else ""
+    posted_short = _safe_string(item.get("PostedShort")) if "PostedShort" in item else ""
+    posted_values = (posted_long, posted_short)
+    posted_date = _posted_date(posted_long) or _posted_date(posted_short)
+    for value in posted_values:
+        parsed = _posted_time(value)
+        if parsed is not None and parsed[1]:
+            return f"{parsed[0]} {posted_date}" if posted_date else parsed[0]
+    for value in posted_values:
+        parsed = _posted_time(value)
+        if parsed is not None:
+            return f"{parsed[0]} {posted_date}" if posted_date else parsed[0]
+    for value in (
+        posted_long, posted_short, item.get("DatePublished"), item.get("date"),
+        item.get("timestamp"),
+    ):
+        date = _posted_date(value)
+        if date is not None:
+            return date
+    if any(key in item for key in _SOURCE_TIME_KEYS):
+        return _safe_string(previous.get("source_time"))
+    return _safe_string(previous.get("source_time"))
+
+
 def _normalized_content(
     item: Dict[str, Any], existing: Optional[Dict[str, Any]] = None
 ) -> Dict[str, str]:
@@ -109,12 +227,7 @@ def _normalized_content(
         if "Description" in item
         else _safe_string(previous.get("description"))
     )
-    if "PostedLong" in item or "PostedShort" in item:
-        posted_long = _safe_string(item.get("PostedLong")) if "PostedLong" in item else ""
-        posted_short = _safe_string(item.get("PostedShort")) if "PostedShort" in item else ""
-        source_time = posted_long or posted_short
-    else:
-        source_time = _safe_string(previous.get("source_time"))
+    source_time = _select_source_time(item, previous)
     eurl = (
         _safe_string(item.get("EURL"))
         if "EURL" in item

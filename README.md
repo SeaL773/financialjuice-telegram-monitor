@@ -119,6 +119,24 @@ Example output:
 Source time: 18:51 08 April 2026
 ```
 
+### Source timestamp precision
+
+The processor prefers reliable aware `DatePublished`, `date`, or `timestamp`
+ISO/epoch values, converting the instant to `America/New_York` before formatting
+`HH:MM:SS DD Month YYYY`. If those values are unavailable or invalid, a posted
+time containing seconds wins over minute-only and date-only posted fields; a
+date-only `PostedLong` is combined with the best available posted time. Naive
+ISO values are not assumed to be UTC. Raw ingress fields remain unchanged, and
+when no usable source-time field is present the previous stored `source_time` is
+preserved.
+
+`FJ_TELEGRAM_RICH_MESSAGES_ENABLED` and `FJ_TRANSLATE_ENABLED` are runtime flags
+read from the process environment; both default to `false`, and the Rich flag
+only changes initial simple breaking-alert delivery while translation remains a
+background opt-in. Enabling either flag does not modify `.env` or credentials.
+Improved timestamp precision is metadata only: messages already sent are not
+retroactively edited when only `source_time` becomes more precise.
+
 The shared system prompt lives in
 [`src/translate/prompts/news_zh.md`](src/translate/prompts/news_zh.md). The
 translation client never truncates input it accepts; oversized input is
