@@ -20,6 +20,7 @@ from src.core.config import DATA_DIR, TELEGRAM_RICH_MESSAGES_ENABLED, TRANSLATE_
 from src.core.security_limits import MAX_ITEMS_PER_PROCESS_BATCH
 from src.telegram.bot import (
     tg_edit_message,
+    tg_edit_rich_message,
     tg_send_group_resumable as tg_send_group,
     tg_send_rich_message,
 )
@@ -1201,6 +1202,19 @@ class NewsProcessor:
                 and state.get("telegram_mode", "classic") == "classic"
                 and await tg_edit_message(message_id, chunks[0])
             ):
+                state["telegram_revision"] = revision
+                state["translation_status"] = "applied"
+                state["translation_revision"] = revision
+                state["translation_message_id"] = message_id
+                self._persist()
+                return True
+
+            if (
+                not state.get("telegram_is_group")
+                and state.get("telegram_mode") == "rich"
+            ):
+                if not await tg_edit_rich_message(message_id, translated_text):
+                    return False
                 state["telegram_revision"] = revision
                 state["translation_status"] = "applied"
                 state["translation_revision"] = revision

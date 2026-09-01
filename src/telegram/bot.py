@@ -47,6 +47,14 @@ def build_rich_html(title: str, description: str, source_time: str) -> Optional[
     return result if len(result.encode("utf-8")) <= 32768 else None
 
 
+def build_rich_text_html(text: str) -> Optional[str]:
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not normalized:
+        return None
+    rich_html = f"<p>{html.escape(normalized).replace(chr(10), '<br>')}</p>"
+    return rich_html if len(rich_html.encode("utf-8")) <= 32768 else None
+
+
 async def tg_send_rich_message(title: str, description: str, source_time: str) -> TelegramRichResult:
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
         return TelegramRichResult(None)
@@ -142,6 +150,41 @@ async def tg_edit_message(message_id: int, text: str) -> bool:
             return True
     except Exception as e:
         logger.error(f"TG edit failed msg_id={message_id}: {e}")
+        return False
+
+
+async def tg_edit_rich_message(message_id: int, text: str) -> bool:
+    if not TG_BOT_TOKEN or not TG_CHAT_ID or not message_id:
+        return False
+    rich_html = build_rich_text_html(text)
+    if rich_html is None:
+        return False
+
+    payload = {
+        "chat_id": TG_CHAT_ID,
+        "message_id": message_id,
+        "rich_message": {"html": rich_html, "skip_entity_detection": True},
+    }
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{_TG_BASE}{TG_BOT_TOKEN}/editMessageText",
+                json=payload,
+                timeout=10,
+            )
+            data = response.json()
+            description = str(data.get("description", ""))
+            if response.status_code != 200 or not data.get("ok"):
+                if "message is not modified" in description.lower():
+                    return True
+                logger.warning(
+                    f"TG rich edit error msg_id={message_id}: "
+                    f"{data.get('error_code')} {description}"
+                )
+                return False
+            return True
+    except Exception as exc:
+        logger.error(f"TG rich edit failed msg_id={message_id}: {exc}")
         return False
 
 
