@@ -11,8 +11,8 @@ from src.core.news_processor import NewsProcessor
 from src.telegram.bot import (
     TelegramRichResult,
     build_rich_html,
-    build_rich_text_html,
-    tg_edit_rich_message,
+    build_rich_translation_html,
+    tg_edit_rich_translation,
     tg_send_rich_message,
 )
 from src.translate.queue_worker import TranslationJob, TranslationQueueWorker
@@ -134,7 +134,7 @@ class RichTests(unittest.IsolatedAsyncioTestCase):
             "src.core.news_processor.tg_send_rich_message",
             new=AsyncMock(return_value=TelegramRichResult(222)),
         ), patch(
-            "src.core.news_processor.tg_edit_rich_message", new=rich_edit
+            "src.core.news_processor.tg_edit_rich_translation", new=rich_edit
         ), patch("src.core.news_processor.tg_send_group", new=classic):
             processor = NewsProcessor(worker, self.state_path)
             await processor.process([news()])
@@ -144,7 +144,7 @@ class RichTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(applied)
         rich_edit.assert_awaited_once_with(
-            222, "English\n———\n中文\n\nSource time: 10:00"
+            222, "Title", "Description", "中文", "10:00"
         )
         classic.assert_not_awaited()
         self.assertEqual("rich", processor._state["1"]["telegram_mode"])
@@ -159,7 +159,7 @@ class RichTests(unittest.IsolatedAsyncioTestCase):
             "src.core.news_processor.tg_send_rich_message",
             new=AsyncMock(return_value=TelegramRichResult(222)),
         ), patch(
-            "src.core.news_processor.tg_edit_rich_message",
+            "src.core.news_processor.tg_edit_rich_translation",
             new=AsyncMock(return_value=False),
         ), patch("src.core.news_processor.tg_send_group", new=classic):
             processor = NewsProcessor(worker, self.state_path)
@@ -192,14 +192,18 @@ class RichTransportTests(unittest.IsolatedAsyncioTestCase):
         with patch("src.telegram.bot.TG_BOT_TOKEN", "token"), patch(
             "src.telegram.bot.TG_CHAT_ID", "chat"
         ), patch("src.telegram.bot.httpx.AsyncClient", Client):
-            edited = await tg_edit_rich_message(77, "English\n———\n中文")
+            edited = await tg_edit_rich_translation(
+                77, "Title", "Description", "中文", "10:00"
+            )
 
         self.assertTrue(edited)
         self.assertTrue(captured["url"].endswith("/editMessageText"))
         self.assertEqual(77, captured["json"]["message_id"])
         self.assertNotIn("text", captured["json"])
         rich_html = captured["json"]["rich_message"]["html"]
-        self.assertIn("English<br>———<br>中文", rich_html)
+        self.assertIn("<h2>Title</h2>", rich_html)
+        self.assertIn("<p>Description</p>", rich_html)
+        self.assertIn("<b>中文：</b>中文", rich_html)
 
     async def test_payload_is_nested_object_and_normalized(self):
         response = httpx.Response(200, json={"ok": True, "result": {"message_id": 7}})
@@ -300,8 +304,8 @@ class RichBuilderTests(unittest.TestCase):
 
     def test_rich_text_builder_escapes_and_preserves_lines(self):
         self.assertEqual(
-            "<p>&lt;English&gt;<br>中文</p>",
-            build_rich_text_html("<English>\n中文"),
+            "<h2>Title &amp; Co</h2>\n<p>Description &amp; details</p>\n<p><b>中文：</b>译文</p>\n<footer>Source time: 10:00</footer>",
+            build_rich_translation_html("Title & Co", "Description & details", "译文", "10:00"),
         )
 
 
