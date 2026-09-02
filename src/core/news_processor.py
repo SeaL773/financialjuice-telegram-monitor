@@ -20,7 +20,7 @@ from src.core.config import DATA_DIR, TELEGRAM_RICH_MESSAGES_ENABLED, TRANSLATE_
 from src.core.security_limits import MAX_ITEMS_PER_PROCESS_BATCH
 from src.telegram.bot import (
     tg_edit_message,
-    tg_edit_rich_message,
+    tg_edit_rich_translation,
     tg_send_group_resumable as tg_send_group,
     tg_send_rich_message,
 )
@@ -183,6 +183,25 @@ def _posted_date(value: Any) -> Optional[str]:
     return None
 
 
+def _posted_datetime_et(time_value: str, date_value: str) -> Optional[str]:
+    parsed_time = _posted_time(time_value)
+    parsed_date = _posted_date(date_value)
+    if parsed_time is None or parsed_date is None:
+        return None
+    time_format = "%H:%M:%S" if parsed_time[1] else "%H:%M"
+    try:
+        parsed = datetime.strptime(
+            f"{parsed_date} {parsed_time[0]}",
+            f"%d %B %Y {time_format}",
+        ).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    converted = parsed.astimezone(_ET)
+    return converted.strftime(
+        "%H:%M:%S %d %B %Y" if parsed_time[1] else "%H:%M %d %B %Y"
+    )
+
+
 def _select_source_time(item: Dict[str, Any], previous: Dict[str, Any]) -> str:
     for key in ("DatePublished", "date", "timestamp"):
         if key in item:
@@ -194,6 +213,12 @@ def _select_source_time(item: Dict[str, Any], previous: Dict[str, Any]) -> str:
     posted_short = _safe_string(item.get("PostedShort")) if "PostedShort" in item else ""
     posted_values = (posted_long, posted_short)
     posted_date = _posted_date(posted_long) or _posted_date(posted_short)
+    for value in (posted_short, posted_long):
+        parsed = _posted_datetime_et(value, posted_long)
+        if parsed is None:
+            parsed = _posted_datetime_et(value, posted_short)
+        if parsed is not None:
+            return parsed
     for value in posted_values:
         parsed = _posted_time(value)
         if parsed is not None and parsed[1]:
@@ -1213,7 +1238,18 @@ class NewsProcessor:
                 not state.get("telegram_is_group")
                 and state.get("telegram_mode") == "rich"
             ):
-                if not await tg_edit_rich_message(message_id, translated_text):
+                translated_only = translated_text
+                if "\n———\n" in translated_only:
+                    translated_only = translated_only.split("\n———\n", 1)[1]
+                if "\n\nSource time:" in translated_only:
+                    translated_only = translated_only.split("\n\nSource time:", 1)[0]
+                if not await tg_edit_rich_translation(
+                    message_id,
+                    state["title"],
+                    state["description"],
+                    translated_only,
+                    state["source_time"],
+                ):
                     return False
                 state["telegram_revision"] = revision
                 state["translation_status"] = "applied"

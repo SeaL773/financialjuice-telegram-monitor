@@ -26,6 +26,29 @@ def item(**overrides):
 
 
 class SourceTimeSelectionTests(unittest.TestCase):
+    def test_posted_utc_time_is_converted_to_et(self):
+        self.assertEqual(
+            "10:00 02 September 2026",
+            _normalized_content(
+                item(PostedLong="02 September 2026", PostedShort="14:00")
+            )["source_time"],
+        )
+
+    def test_posted_utc_winter_time_uses_est(self):
+        self.assertEqual(
+            "09:00 02 January 2026",
+            _normalized_content(
+                item(PostedLong="02 January 2026", PostedShort="14:00")
+            )["source_time"],
+        )
+
+    def test_posted_utc_seconds_are_converted_to_et(self):
+        self.assertEqual(
+            "10:00:27 02 September 2026",
+            _normalized_content(
+                item(PostedLong="02 September 2026", PostedShort="14:00:27")
+            )["source_time"],
+        )
     def test_iso_with_milliseconds_z_and_offset_preserves_seconds(self):
         self.assertEqual(
             "07:03:27 01 September 2026",
@@ -48,17 +71,17 @@ class SourceTimeSelectionTests(unittest.TestCase):
 
     def test_date_only_posted_long_combines_with_precise_or_minute_posted_short(self):
         self.assertEqual(
-            "11:03 01 September 2026",
+            "07:03 01 September 2026",
             _normalized_content(item())["source_time"],
         )
         self.assertEqual(
-            "11:03:27 01 September 2026",
+            "07:03:27 01 September 2026",
             _normalized_content(item(PostedShort="11:03:27"))["source_time"],
         )
 
     def test_seconds_win_over_field_order_and_minute_precision(self):
         self.assertEqual(
-            "11:03:27 01 September 2026",
+            "07:03:27 01 September 2026",
             _normalized_content(
                 item(PostedLong="11:03 01 September 2026", PostedShort="11:03:27")
             )["source_time"],
@@ -66,7 +89,7 @@ class SourceTimeSelectionTests(unittest.TestCase):
 
     def test_naive_iso_is_not_treated_as_utc(self):
         self.assertEqual(
-            "11:03 01 September 2026",
+            "07:03 01 September 2026",
             _normalized_content(
                 item(DatePublished="2026-09-01T11:03:27", PostedShort="11:03")
             )["source_time"],
@@ -74,11 +97,11 @@ class SourceTimeSelectionTests(unittest.TestCase):
 
     def test_missing_or_invalid_date_published_falls_back_without_inventing_seconds(self):
         self.assertEqual(
-            "11:03 01 September 2026",
+            "07:03 01 September 2026",
             _normalized_content(item(DatePublished="not-a-time"))["source_time"],
         )
         self.assertEqual(
-            "11:03 01 September 2026",
+            "07:03 01 September 2026",
             _normalized_content(item(DatePublished="2026-09-01"))["source_time"],
         )
 

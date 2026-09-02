@@ -86,7 +86,7 @@ class ProcessorTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, processor._state["1"]["notification_revision"])
         self.assertIn("A &lt; B", sent[0])
         self.assertIn("Full &amp; expanded", sent[0])
-        self.assertIn("10:00 01 January 2026", sent[0])
+        self.assertIn("05:00 01 January 2026", sent[0])
 
     async def test_same_id_description_expansion_edits_existing(self):
         with patch("src.core.news_processor.tg_send_group", new=AsyncMock(return_value=[101])), patch(
@@ -398,7 +398,7 @@ class ProcessorTestCase(unittest.IsolatedAsyncioTestCase):
 
         state = processor._state["1"]
         self.assertEqual("Keep me", state["description"])
-        self.assertEqual("10:00 01 January 2026", state["source_time"])
+        self.assertEqual("05:00 01 January 2026", state["source_time"])
         self.assertEqual("https://example.test/news", state["eurl"])
         self.assertEqual(2, state["revision"])
         edit_call = edit.await_args
@@ -443,7 +443,7 @@ class ProcessorTestCase(unittest.IsolatedAsyncioTestCase):
             }], source="POLL")
 
         self.assertEqual(1, processor._state["1"]["revision"])
-        self.assertEqual("10:00:27 01 January 2026", processor._state["1"]["source_time"])
+        self.assertEqual("05:00:27 01 January 2026", processor._state["1"]["source_time"])
         self.assertEqual("https://example.test/poll", processor._state["1"]["eurl"])
         self.assertEqual("POLL", processor._state["1"]["source_method"])
         edit.assert_not_awaited()
