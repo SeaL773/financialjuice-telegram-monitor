@@ -67,7 +67,7 @@ def build_rich_translation_html(
     parts = [f"<h2>{html.escape(title_text)}</h2>"]
     if description_text:
         parts.append(f"<p>{html.escape(description_text).replace(chr(10), '<br>')}</p>")
-    parts.append(f"<p><b>中文：</b>{html.escape(translated_text).replace(chr(10), '<br>')}</p>")
+    parts.append(f"<p>{html.escape(translated_text).replace(chr(10), '<br>')}</p>")
     parts.append(f"<footer>Source time: {html.escape(source_text)}</footer>")
     rich_html = "\n".join(parts)
     return rich_html if len(rich_html.encode("utf-8")) <= 32768 else None

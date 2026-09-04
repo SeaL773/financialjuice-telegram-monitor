@@ -203,7 +203,7 @@ class RichTransportTests(unittest.IsolatedAsyncioTestCase):
         rich_html = captured["json"]["rich_message"]["html"]
         self.assertIn("<h2>Title</h2>", rich_html)
         self.assertIn("<p>Description</p>", rich_html)
-        self.assertIn("<b>中文：</b>中文", rich_html)
+        self.assertIn("<p>中文</p>", rich_html)
 
     async def test_payload_is_nested_object_and_normalized(self):
         response = httpx.Response(200, json={"ok": True, "result": {"message_id": 7}})
@@ -304,7 +304,7 @@ class RichBuilderTests(unittest.TestCase):
 
     def test_rich_text_builder_escapes_and_preserves_lines(self):
         self.assertEqual(
-            "<h2>Title &amp; Co</h2>\n<p>Description &amp; details</p>\n<p><b>中文：</b>译文</p>\n<footer>Source time: 10:00</footer>",
+            "<h2>Title &amp; Co</h2>\n<p>Description &amp; details</p>\n<p>译文</p>\n<footer>Source time: 10:00</footer>",
             build_rich_translation_html("Title & Co", "Description & details", "译文", "10:00"),
         )
 
