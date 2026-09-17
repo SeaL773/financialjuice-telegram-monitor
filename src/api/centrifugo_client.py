@@ -13,6 +13,8 @@ from src.core.security_limits import (
 )
 from src.utils.LoggerManager import logger
 
+NEWS_CHANNEL_PREFIXES = ("feed:", "feedmain:")
+
 _ws_common: ModuleType = importlib.import_module("src.api.ws_common")
 USER_AGENT: str = getattr(_ws_common, "USER_AGENT")
 WSAuthError: type[Exception] = getattr(_ws_common, "WSAuthError")
@@ -173,7 +175,29 @@ class CentrifugoClient:
 
     @classmethod
     def _parse_frame(cls, text: str) -> list[dict[str, Any]]:
-        envelope = cls._parse_json(text)
+        frame_bytes = len(text.encode("utf-8"))
+        if frame_bytes > MAX_WS_TEXT_FRAME_BYTES:
+            raise WSConnectionError(
+                f"Centrifugo frame bytes={frame_bytes} limit={MAX_WS_TEXT_FRAME_BYTES}"
+            )
+
+        out: list[dict[str, Any]] = []
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            try:
+                envelope = json.loads(line)
+            except json.JSONDecodeError:
+                logger.warning(f"Skip unparsable Centrifugo object: {line[:200]}")
+                continue
+            if not isinstance(envelope, dict):
+                logger.warning(f"Skip Centrifugo payload type: {type(envelope).__name__}")
+                continue
+            out.extend(cls._parse_envelope(envelope))
+        return out
+
+    @classmethod
+    def _parse_envelope(cls, envelope: dict[str, Any]) -> list[dict[str, Any]]:
         error = envelope.get("error")
         if error:
             code = error.get("code")
@@ -187,7 +211,7 @@ class CentrifugoClient:
             return []
 
         channel = push.get("channel") or ""
-        if not channel.startswith("feed:"):
+        if not channel.startswith(NEWS_CHANNEL_PREFIXES):
             return []
 
         pub = push.get("pub")

@@ -22,6 +22,28 @@ class CentrifugoIngressTestCase(unittest.TestCase):
     def test_non_feed_channel_is_ignored(self) -> None:
         self.assertEqual([], CentrifugoClient._parse_frame(self._frame({}, "calendar:all")))
 
+    def test_feedmain_channel_is_accepted(self) -> None:
+        items = CentrifugoClient._parse_frame(
+            self._frame(json.dumps([{"NewsID": 11}]), "feedmain:lite_rid:0")
+        )
+        self.assertEqual([11], [i["NewsID"] for i in items])
+        self.assertEqual("feedmain:lite_rid:0", items[0]["__ws_channel__"])
+
+    def test_newline_batched_frame_yields_every_object(self) -> None:
+        batched = "\n".join(
+            (
+                self._frame(json.dumps([{"NewsID": 1}]), "feed:all"),
+                self._frame(json.dumps([{"NewsID": 2}]), "feedmain:lite_rid:0"),
+            )
+        )
+        self.assertEqual([1, 2], [i["NewsID"] for i in CentrifugoClient._parse_frame(batched)])
+
+    def test_unparsable_object_is_skipped_without_dropping_batch(self) -> None:
+        batched = "\n".join(
+            ("{not json", self._frame(json.dumps([{"NewsID": 3}])), "12345")
+        )
+        self.assertEqual([3], [i["NewsID"] for i in CentrifugoClient._parse_frame(batched)])
+
     def test_oversized_frame_rejected_before_json_parse(self) -> None:
         with patch("src.api.centrifugo_client.MAX_WS_TEXT_FRAME_BYTES", 4), patch(
             "src.api.centrifugo_client.json.loads"
