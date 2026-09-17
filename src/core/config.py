@@ -2,6 +2,7 @@ import json
 import math
 import os
 import sys
+import tempfile
 from typing import cast
 
 from dotenv import load_dotenv
@@ -31,8 +32,15 @@ TG_THREAD_ID = _optional_positive_int("TG_THREAD_ID")
 FJ_EMAIL = os.environ.get("FJ_EMAIL", "")
 FJ_PASSWORD = os.environ.get("FJ_PASSWORD", "")
 
-DATA_DIR = os.path.join(
+_REPO_DATA_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data"
+)
+# Archives are written unconditionally, so tests must never target the live
+# data directory that the running container has mounted.
+DATA_DIR = (
+    _REPO_DATA_DIR
+    if "unittest" not in sys.modules
+    else os.path.join(tempfile.gettempdir(), "fj-monitor-test-data")
 )
 COOKIES_PATH = os.environ.get("FJ_COOKIES_PATH", os.path.join(DATA_DIR, "cookies.json"))
 
