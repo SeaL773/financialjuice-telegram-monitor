@@ -47,14 +47,6 @@ def build_rich_html(title: str, description: str, source_time: str) -> Optional[
     return result if len(result.encode("utf-8")) <= 32768 else None
 
 
-def build_rich_text_html(text: str) -> Optional[str]:
-    normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip()
-    if not normalized:
-        return None
-    rich_html = f"<p>{html.escape(normalized).replace(chr(10), '<br>')}</p>"
-    return rich_html if len(rich_html.encode("utf-8")) <= 32768 else None
-
-
 def build_rich_translation_html(
     title: str, description: str, translated: str, source_time: str
 ) -> Optional[str]:
@@ -171,13 +163,9 @@ async def tg_edit_message(message_id: int, text: str) -> bool:
         return False
 
 
-async def tg_edit_rich_message(message_id: int, text: str) -> bool:
-    if not TG_BOT_TOKEN or not TG_CHAT_ID or not message_id:
+async def _tg_edit_rich(message_id: int, rich_html: Optional[str], label: str) -> bool:
+    if not TG_BOT_TOKEN or not TG_CHAT_ID or not message_id or rich_html is None:
         return False
-    rich_html = build_rich_text_html(text)
-    if rich_html is None:
-        return False
-
     payload = {
         "chat_id": TG_CHAT_ID,
         "message_id": message_id,
@@ -186,9 +174,7 @@ async def tg_edit_rich_message(message_id: int, text: str) -> bool:
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                f"{_TG_BASE}{TG_BOT_TOKEN}/editMessageText",
-                json=payload,
-                timeout=10,
+                f"{_TG_BASE}{TG_BOT_TOKEN}/editMessageText", json=payload, timeout=10
             )
             data = response.json()
             description = str(data.get("description", ""))
@@ -196,14 +182,26 @@ async def tg_edit_rich_message(message_id: int, text: str) -> bool:
                 if "message is not modified" in description.lower():
                     return True
                 logger.warning(
-                    f"TG rich edit error msg_id={message_id}: "
+                    f"TG {label} edit error msg_id={message_id}: "
                     f"{data.get('error_code')} {description}"
                 )
                 return False
             return True
     except Exception as exc:
-        logger.error(f"TG rich edit failed msg_id={message_id}: {exc}")
+        logger.error(f"TG {label} edit failed msg_id={message_id}: {exc}")
         return False
+
+
+async def tg_edit_rich_headline(
+    message_id: int, title: str, description: str, source_time: str
+) -> bool:
+    """Apply an editorial revision to an existing rich message in place."""
+    try:
+        rich_html = build_rich_html(title, description, source_time)
+    except TelegramRenderLimitError as exc:
+        logger.warning(f"TG rich headline normalization rejected: {exc}")
+        return False
+    return await _tg_edit_rich(message_id, rich_html, "rich headline")
 
 
 async def tg_edit_rich_translation(
@@ -213,37 +211,12 @@ async def tg_edit_rich_translation(
     translated: str,
     source_time: str,
 ) -> bool:
-    if not TG_BOT_TOKEN or not TG_CHAT_ID or not message_id:
-        return False
-    rich_html = build_rich_translation_html(title, description, translated, source_time)
-    if rich_html is None:
-        return False
-    payload = {
-        "chat_id": TG_CHAT_ID,
-        "message_id": message_id,
-        "rich_message": {"html": rich_html, "skip_entity_detection": True},
-    }
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{_TG_BASE}{TG_BOT_TOKEN}/editMessageText",
-                json=payload,
-                timeout=10,
-            )
-            data = response.json()
-            description_text = str(data.get("description", ""))
-            if response.status_code != 200 or not data.get("ok"):
-                if "message is not modified" in description_text.lower():
-                    return True
-                logger.warning(
-                    f"TG rich translation edit error msg_id={message_id}: "
-                    f"{data.get('error_code')} {description_text}"
-                )
-                return False
-            return True
-    except Exception as exc:
-        logger.error(f"TG rich translation edit failed msg_id={message_id}: {exc}")
+        rich_html = build_rich_translation_html(title, description, translated, source_time)
+    except TelegramRenderLimitError as exc:
+        logger.warning(f"TG rich translation normalization rejected: {exc}")
         return False
+    return await _tg_edit_rich(message_id, rich_html, "rich translation")
 
 
 async def tg_send_group(texts: List[str], important: bool = False) -> List[int]:

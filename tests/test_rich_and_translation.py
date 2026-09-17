@@ -150,6 +150,44 @@ class RichTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("rich", processor._state["1"]["telegram_mode"])
         self.assertEqual(222, processor._state["1"]["translation_message_id"])
 
+    async def test_rich_revision_edits_original_instead_of_sending_update(self):
+        worker = CapturingWorker()
+        headline_edit = AsyncMock(return_value=True)
+        classic = AsyncMock()
+        with patch("src.core.news_processor.TELEGRAM_RICH_MESSAGES_ENABLED", True), patch(
+            "src.core.news_processor.tg_send_rich_message",
+            new=AsyncMock(return_value=TelegramRichResult(222)),
+        ), patch(
+            "src.core.news_processor.tg_edit_rich_headline", new=headline_edit
+        ), patch("src.core.news_processor.tg_send_group", new=classic):
+            processor = NewsProcessor(worker, self.state_path)
+            await processor.process([news()])
+            await processor.process([news(description="Revised body")])
+
+        headline_edit.assert_awaited_once()
+        self.assertEqual(222, headline_edit.await_args.args[0])
+        self.assertEqual("Revised body", headline_edit.await_args.args[2])
+        classic.assert_not_awaited()
+        self.assertEqual("rich", processor._state["1"]["telegram_mode"])
+        self.assertEqual(2, processor._state["1"]["notification_revision"])
+
+    async def test_rich_revision_edit_failure_keeps_pending_without_duplicate(self):
+        worker = CapturingWorker()
+        classic = AsyncMock()
+        with patch("src.core.news_processor.TELEGRAM_RICH_MESSAGES_ENABLED", True), patch(
+            "src.core.news_processor.tg_send_rich_message",
+            new=AsyncMock(return_value=TelegramRichResult(222)),
+        ), patch(
+            "src.core.news_processor.tg_edit_rich_headline",
+            new=AsyncMock(return_value=False),
+        ), patch("src.core.news_processor.tg_send_group", new=classic):
+            processor = NewsProcessor(worker, self.state_path)
+            await processor.process([news()])
+            await processor.process([news(description="Revised body")])
+
+        classic.assert_not_awaited()
+        self.assertEqual(1, processor._state["1"]["notification_revision"])
+
     async def test_rich_translation_edit_failure_does_not_publish_duplicate(self):
         worker = CapturingWorker()
         classic = AsyncMock()

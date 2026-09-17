@@ -20,6 +20,7 @@ from src.core.config import DATA_DIR, TELEGRAM_RICH_MESSAGES_ENABLED, TRANSLATE_
 from src.core.security_limits import MAX_ITEMS_PER_PROCESS_BATCH
 from src.telegram.bot import (
     tg_edit_message,
+    tg_edit_rich_headline,
     tg_edit_rich_translation,
     tg_send_group_resumable as tg_send_group,
     tg_send_rich_message,
@@ -1368,6 +1369,21 @@ class NewsProcessor:
                 f"Telegram render rejected news_id={nid} revision={state['revision']}: {exc}"
             )
             return
+        if not state.get("telegram_is_group") and state.get("telegram_mode") == "rich":
+            if not await tg_edit_rich_headline(
+                message_id, state["title"], state["description"], state["source_time"]
+            ):
+                logger.warning(
+                    f"Rich revision edit failed news_id={nid} revision={state['revision']}; "
+                    "keeping revision pending instead of publishing a duplicate"
+                )
+                return
+            state["notification_revision"] = state["revision"]
+            state["telegram_revision"] = state["revision"]
+            self._persist()
+            self._enqueue_translation(nid, state)
+            return
+
         if (
             not state.get("telegram_is_group")
             and len(chunks) == 1
