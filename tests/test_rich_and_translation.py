@@ -138,9 +138,7 @@ class RichTests(unittest.IsolatedAsyncioTestCase):
         ), patch("src.core.news_processor.tg_send_group", new=classic):
             processor = NewsProcessor(worker, self.state_path)
             await processor.process([news()])
-            applied = await processor.apply_translated_revision(
-                "1", 1, 222, "English\n———\n中文\n\nSource time: 10:00"
-            )
+            applied = await processor.apply_translated_revision("1", 1, 222, "中文")
 
         self.assertTrue(applied)
         rich_edit.assert_awaited_once_with(
@@ -351,8 +349,7 @@ class TranslationWorkerTests(unittest.IsolatedAsyncioTestCase):
     def _job(self, apply_translation, finish_attempt):
         return TranslationJob(
             news_id="1", revision=1, message_id=101, original_text="original",
-            source_time="10:00", prefix="UPDATE\n", apply_translation=apply_translation,
-            finish_attempt=finish_attempt,
+            apply_translation=apply_translation, finish_attempt=finish_attempt,
         )
 
     async def test_translate_exception_finishes_once_and_worker_remains_usable(self):

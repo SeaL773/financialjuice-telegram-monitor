@@ -45,6 +45,7 @@ MAX_DESCRIPTION_LENGTH = 250_000
 MAX_SOURCE_TIME_LENGTH = 1_024
 MAX_EURL_LENGTH = 8_192
 MAX_TRANSLATION_INPUT_LENGTH = 120_000
+MAX_TRANSLATION_TEXT_LENGTH = 16_384
 MAX_PROCESSOR_STATE_BYTES = 256 * 1024 * 1024
 MAX_PENDING_ARCHIVE_RECORDS = 128
 MAX_PENDING_ARCHIVE_BYTES = 32 * 1024 * 1024
@@ -496,6 +497,15 @@ def _translation_text(content: Dict[str, str]) -> str:
     return title
 
 
+def _bilingual_text(prefix: str, original: str, translated: str, source_time: str) -> str:
+    return (
+        f"{prefix}{original}\n"
+        f"———\n"
+        f"{translated}\n\n"
+        f"Source time: {source_time}"
+    )
+
+
 class NewsProcessor:
     def __init__(
         self,
@@ -580,6 +590,8 @@ class NewsProcessor:
                 "translation_revision": 0,
                 "translation_message_id": None,
                 "translation_status": "disabled",
+                "translation_text": "",
+                "telegram_source_time": "",
                 "last_seen_seq": 0,
             }
             if nid not in latest and len(latest) >= MAX_STATE_ENTRIES:
@@ -724,6 +736,24 @@ class NewsProcessor:
             ):
                 logger.warning(f"Discard invalid processor metadata news_id={nid}")
                 continue
+            translation_text = _safe_string(raw_state.get("translation_text"))
+            if len(translation_text) > MAX_TRANSLATION_TEXT_LENGTH:
+                logger.warning(f"Discard oversized stored translation news_id={nid}")
+                self._state_repaired = True
+                translation_text = ""
+            raw_delivered_source_time = raw_state.get("telegram_source_time")
+            if raw_delivered_source_time is None:
+                # Entries persisted before footer refresh already match their delivered message.
+                delivered_source_time = content["source_time"] if primary_message_id else ""
+            elif (
+                isinstance(raw_delivered_source_time, str)
+                and len(raw_delivered_source_time) <= MAX_SOURCE_TIME_LENGTH
+            ):
+                delivered_source_time = raw_delivered_source_time
+            else:
+                logger.warning(f"Discard invalid delivered source time news_id={nid}")
+                self._state_repaired = True
+                delivered_source_time = ""
             candidate_state = {
                 "level": level,
                 "breaking": bool(raw_state.get("breaking")),
@@ -764,6 +794,8 @@ class NewsProcessor:
                     "translation_status", "pending" if TRANSLATE_ENABLED else "disabled"
                 ),
                 "last_seen_seq": _safe_nonnegative_int(raw_state.get("last_seen_seq", 0)),
+                "translation_text": translation_text,
+                "telegram_source_time": delivered_source_time,
             }
             if not isinstance(candidate_state["telegram_mode"], str) or candidate_state["telegram_mode"] not in {"classic", "rich"}:
                 logger.warning(f"Discard invalid Telegram mode news_id={nid}")
@@ -859,6 +891,7 @@ class NewsProcessor:
                 state.get("translation_status") == "pending"
                 and state.get("translation_revision") == state.get("revision")
             )
+            or self._source_time_stale(state)
         )
 
     def _ensure_new_entry_capacity(self) -> bool:
@@ -1162,8 +1195,6 @@ class NewsProcessor:
                 revision=state["revision"],
                 message_id=message_id,
                 original_text=original,
-                source_time=state["source_time"],
-                prefix=state["prefix"],
                 apply_translation=self.apply_translated_revision,
                 finish_attempt=self._finish_translation_attempt,
             )
@@ -1194,9 +1225,19 @@ class NewsProcessor:
         state["telegram_revision"] = revision
         state["telegram_mode"] = "classic"
         state["alert_recorded"] = True
+        state["telegram_source_time"] = _safe_string(state.get("source_time"))
+
+    def _storable_translation(self, nid: str, translated: str) -> str:
+        if len(translated) > MAX_TRANSLATION_TEXT_LENGTH:
+            logger.info(
+                f"Skip storing translation for footer refresh news_id={nid} "
+                f"length={len(translated)} limit={MAX_TRANSLATION_TEXT_LENGTH}"
+            )
+            return ""
+        return translated
 
     async def apply_translated_revision(
-        self, news_id: str, revision: int, message_id: int, translated_text: str
+        self, news_id: str, revision: int, message_id: int, translated: str
     ) -> bool:
         """Validate and publish a translated revision while publication is serialized."""
         async with self._publication_lock:
@@ -1215,8 +1256,12 @@ class NewsProcessor:
                 state["pending_group"] = None
                 self._persist()
 
+            source_time = state["source_time"]
             try:
-                chunks = render_message_chunks(translated_text, group_label="UPDATE")
+                bilingual = _bilingual_text(
+                    state["prefix"], _translation_text(state), translated, source_time
+                )
+                chunks = render_message_chunks(bilingual, group_label="UPDATE")
             except TelegramRenderLimitError as exc:
                 logger.warning(
                     f"Reject translated render news_id={news_id} revision={revision}: {exc}"
@@ -1229,9 +1274,11 @@ class NewsProcessor:
                 and await tg_edit_message(message_id, chunks[0])
             ):
                 state["telegram_revision"] = revision
+                state["telegram_source_time"] = source_time
                 state["translation_status"] = "applied"
                 state["translation_revision"] = revision
                 state["translation_message_id"] = message_id
+                state["translation_text"] = self._storable_translation(news_id, translated)
                 self._persist()
                 return True
 
@@ -1239,29 +1286,26 @@ class NewsProcessor:
                 not state.get("telegram_is_group")
                 and state.get("telegram_mode") == "rich"
             ):
-                translated_only = translated_text
-                if "\n———\n" in translated_only:
-                    translated_only = translated_only.split("\n———\n", 1)[1]
-                if "\n\nSource time:" in translated_only:
-                    translated_only = translated_only.split("\n\nSource time:", 1)[0]
                 if not await tg_edit_rich_translation(
                     message_id,
                     state["title"],
                     state["description"],
-                    translated_only,
-                    state["source_time"],
+                    translated,
+                    source_time,
                 ):
                     return False
                 state["telegram_revision"] = revision
+                state["telegram_source_time"] = source_time
                 state["translation_status"] = "applied"
                 state["translation_revision"] = revision
                 state["translation_message_id"] = message_id
+                state["translation_text"] = self._storable_translation(news_id, translated)
                 self._persist()
                 return True
 
             try:
                 replacement = render_message_chunks(
-                    f"UPDATE\n{translated_text}", group_label="UPDATE"
+                    f"UPDATE\n{bilingual}", group_label="UPDATE"
                 )
             except TelegramRenderLimitError as exc:
                 logger.warning(
@@ -1276,6 +1320,7 @@ class NewsProcessor:
             state["translation_status"] = "applied"
             state["translation_revision"] = revision
             state["translation_message_id"] = state.get("telegram_message_id")
+            state["translation_text"] = self._storable_translation(news_id, translated)
             self._persist()
             self._translation_enqueued = {
                 key for key in self._translation_enqueued
@@ -1310,6 +1355,7 @@ class NewsProcessor:
                     state["telegram_message_id"] = rich_result.message_id
                     state["telegram_is_group"] = False
                     state["telegram_revision"] = state["revision"]
+                    state["telegram_source_time"] = source_time
                     state["alert_recorded"] = True
                     state["notification_revision"] = state["revision"]
                     self._persist()
@@ -1380,6 +1426,7 @@ class NewsProcessor:
                 return
             state["notification_revision"] = state["revision"]
             state["telegram_revision"] = state["revision"]
+            state["telegram_source_time"] = state["source_time"]
             self._persist()
             self._enqueue_translation(nid, state)
             return
@@ -1393,6 +1440,7 @@ class NewsProcessor:
             state["notification_revision"] = state["revision"]
             state["telegram_revision"] = state["revision"]
             state["telegram_mode"] = "classic"
+            state["telegram_source_time"] = state["source_time"]
             self._persist()
             self._enqueue_translation(nid, state)
             return
@@ -1409,6 +1457,77 @@ class NewsProcessor:
             return
         if message_ids:
             self._enqueue_translation(nid, state)
+
+    def _source_time_stale(self, state: Dict[str, Any]) -> bool:
+        """Report whether the delivered message still carries a superseded source time."""
+        return bool(
+            state.get("alert_recorded")
+            and state.get("telegram_message_id")
+            and _safe_nonnegative_int(state.get("notification_revision"))
+            == _safe_nonnegative_int(state.get("revision"))
+            and _safe_string(state.get("telegram_source_time"))
+            != _safe_string(state.get("source_time"))
+        )
+
+    async def _refresh_source_time(self, nid: str, state: Dict[str, Any]) -> None:
+        """Re-render the footer in place after upstream corrects a published source time."""
+        message_id = state.get("telegram_message_id")
+        source_time = state["source_time"]
+        translation_applied = state.get("translation_status") == "applied"
+        translated = _safe_string(state.get("translation_text"))
+        if state.get("telegram_is_group"):
+            self._accept_delivered_source_time(nid, state, "multi-message representation")
+            return
+        if translation_applied and not translated:
+            self._accept_delivered_source_time(nid, state, "translation text unavailable")
+            return
+        if state.get("telegram_mode") == "rich":
+            edited = await (
+                tg_edit_rich_translation(
+                    message_id, state["title"], state["description"], translated, source_time
+                )
+                if translation_applied
+                else tg_edit_rich_headline(
+                    message_id, state["title"], state["description"], source_time
+                )
+            )
+        else:
+            try:
+                text = (
+                    _bilingual_text(
+                        state["prefix"], _translation_text(state), translated, source_time
+                    )
+                    if translation_applied
+                    else _english_text(state["prefix"], state)
+                )
+                chunks = render_message_chunks(text, group_label="UPDATE")
+            except TelegramRenderLimitError as exc:
+                logger.warning(f"Source time refresh render rejected news_id={nid}: {exc}")
+                return
+            if len(chunks) != 1:
+                self._accept_delivered_source_time(nid, state, "message spans multiple chunks")
+                return
+            edited = await tg_edit_message(message_id, chunks[0])
+        if not edited:
+            logger.warning(f"Source time refresh edit failed news_id={nid}")
+            return
+        state["telegram_source_time"] = source_time
+        self._persist()
+        logger.info(
+            f"🕒 Refreshed source time news_id={nid} "
+            f"source_time={_safe_log_text(source_time, 64)}"
+        )
+
+    def _accept_delivered_source_time(
+        self, nid: str, state: Dict[str, Any], reason: str
+    ) -> None:
+        """Stop retrying a footer refresh the delivered representation cannot carry."""
+        logger.info(
+            f"Skip source time refresh news_id={nid} reason={reason} "
+            f"source_time={_safe_log_text(state['source_time'], 64)}"
+        )
+        state["telegram_source_time"] = state["source_time"]
+        self._persist()
 
     async def process(self, items: List[Dict[str, Any]], source: str = "?") -> None:
         if len(items) > MAX_ITEMS_PER_PROCESS_BATCH:
@@ -1533,6 +1652,7 @@ class NewsProcessor:
                     "breaking_archive_revision": 0, "raw_archive_pending": [],
                     "breaking_archive_pending": [], "pending_group": None,
                     "pending_rich": None,
+                    "translation_text": "", "telegram_source_time": "",
                     "last_seen_seq": self._last_seen_seq + 1,
                 }
                 simulated[nid] = simulated_state
@@ -1561,6 +1681,7 @@ class NewsProcessor:
             state["translation_revision"] = 0
             state["translation_message_id"] = None
             state["translation_status"] = "disabled"
+            state["translation_text"] = ""
             state["pending_rich"] = None
             pending_group = state.get("pending_group")
             if (
@@ -1635,7 +1756,8 @@ class NewsProcessor:
             and state.get("translation_status") != "applied"
         )
         pending_rich = bool(state.get("pending_rich"))
-        if not content_changed and not upgraded and not pending_notification and not archive_pending and not translation_recovery and not pending_rich:
+        source_time_stale = self._source_time_stale(state)
+        if not content_changed and not upgraded and not pending_notification and not archive_pending and not translation_recovery and not pending_rich and not source_time_stale:
             if pending_translation:
                 await self._resume_pending_translation(nid, state)
             return
@@ -1667,3 +1789,5 @@ class NewsProcessor:
             self._flush_archives(nid, state)
             if translation_recovery:
                 self._enqueue_translation(nid, state)
+        if self._source_time_stale(state):
+            await self._refresh_source_time(nid, state)

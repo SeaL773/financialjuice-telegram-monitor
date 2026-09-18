@@ -134,8 +134,12 @@ preserved.
 read from the process environment; both default to `false`, and the Rich flag
 only changes initial simple breaking-alert delivery while translation remains a
 background opt-in. Enabling either flag does not modify `.env` or credentials.
-Improved timestamp precision is metadata only: messages already sent are not
-retroactively edited when only `source_time` becomes more precise.
+When upstream later corrects `source_time` for an already published alert, the
+delivered message's footer is re-rendered in place: the classic or rich message
+is edited, the revision and both archives stay untouched, and an already
+published translation is preserved. Numbered multi-message groups keep their
+delivered footer, and the correction is recorded in state so it is not retried
+forever.
 
 The shared system prompt lives in
 [`src/translate/prompts/news_zh.md`](src/translate/prompts/news_zh.md). The

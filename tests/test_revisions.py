@@ -425,7 +425,7 @@ class ProcessorTestCase(unittest.IsolatedAsyncioTestCase):
         if edit_call is not None:
             self.assertNotIn("Remove me", edit_call.args[1])
 
-    async def test_metadata_only_ws_poll_difference_does_not_revise_or_publish(self):
+    async def test_metadata_only_ws_poll_difference_refreshes_footer_without_revising(self):
         send = AsyncMock(return_value=[101])
         edit = AsyncMock(return_value=True)
         with patch("src.core.news_processor.tg_send_group", new=send), patch(
@@ -446,7 +446,9 @@ class ProcessorTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("05:00:27 01 January 2026", processor._state["1"]["source_time"])
         self.assertEqual("https://example.test/poll", processor._state["1"]["eurl"])
         self.assertEqual("POLL", processor._state["1"]["source_method"])
-        edit.assert_not_awaited()
+        self.assertEqual(1, send.await_count)
+        edit.assert_awaited_once()
+        self.assertIn("05:00:27 01 January 2026", edit.await_args.args[1])
         archive_save.assert_not_called()
 
     async def test_simultaneous_content_expansion_and_upgrade_has_coherent_markers(self):
@@ -1512,32 +1514,11 @@ class TranslationWorkerTestCase(unittest.IsolatedAsyncioTestCase):
             revision=1,
             message_id=10,
             original_text="old",
-            source_time="source",
-            prefix="🚨 ",
             apply_translation=apply_translation,
         )
         with patch("src.translate.queue_worker.translate", new=AsyncMock(return_value="旧")):
             await worker._handle(job)
         apply_translation.assert_awaited_once()
-
-    async def test_source_time_preserved(self):
-        worker = TranslationQueueWorker()
-        apply_translation = AsyncMock(return_value=True)
-        job = TranslationJob(
-            news_id="1",
-            revision=2,
-            message_id=10,
-            original_text="latest",
-            source_time="09:31 FJ",
-            prefix="UPDATE\n",
-            apply_translation=apply_translation,
-        )
-        with patch("src.translate.queue_worker.translate", new=AsyncMock(return_value="最新")):
-            await worker._handle(job)
-        edit_call = apply_translation.await_args
-        self.assertIsNotNone(edit_call)
-        if edit_call is not None:
-            self.assertIn("09:31 FJ", edit_call.args[3])
 
     async def test_translation_edit_failure_uses_replacement_and_reports_id(self):
         worker = TranslationQueueWorker()
@@ -1547,8 +1528,6 @@ class TranslationWorkerTestCase(unittest.IsolatedAsyncioTestCase):
             revision=3,
             message_id=10,
             original_text="latest",
-            source_time="source",
-            prefix="UPDATE\n",
             apply_translation=apply_translation,
         )
         with patch("src.translate.queue_worker.translate", new=AsyncMock(return_value="最新")):
@@ -1563,8 +1542,6 @@ class TranslationWorkerTestCase(unittest.IsolatedAsyncioTestCase):
             revision=4,
             message_id=10,
             original_text="latest English",
-            source_time="source",
-            prefix="UPDATE\n",
             apply_translation=apply_translation,
         )
         with patch("src.translate.queue_worker.translate", new=AsyncMock(return_value=None)):
