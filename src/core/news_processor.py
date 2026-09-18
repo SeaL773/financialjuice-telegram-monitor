@@ -94,6 +94,11 @@ def _safe_nonnegative_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _rejects_source_time(accepted_method: str, incoming_method: str) -> bool:
+    """Keep feed:all event times when feedmain replays the observed publish time."""
+    return accepted_method == "feed:all" and incoming_method.startswith("feedmain:")
+
+
 def _news_id(value: Any) -> str:
     if value is None or isinstance(value, bool):
         return ""
@@ -592,6 +597,7 @@ class NewsProcessor:
                 "translation_status": "disabled",
                 "translation_text": "",
                 "telegram_source_time": "",
+                "source_time_method": _safe_string(record.get("source_method")) or "legacy_archive",
                 "last_seen_seq": 0,
             }
             if nid not in latest and len(latest) >= MAX_STATE_ENTRIES:
@@ -754,6 +760,19 @@ class NewsProcessor:
                 logger.warning(f"Discard invalid delivered source time news_id={nid}")
                 self._state_repaired = True
                 delivered_source_time = ""
+            if "source_time_method" not in raw_state:
+                source_time_method = source_method if content["source_time"] else ""
+            else:
+                raw_source_time_method = raw_state.get("source_time_method")
+                if (
+                    isinstance(raw_source_time_method, str)
+                    and len(raw_source_time_method) <= MAX_SOURCE_METHOD_LENGTH
+                ):
+                    source_time_method = raw_source_time_method
+                else:
+                    logger.warning(f"Discard invalid source time method news_id={nid}")
+                    self._state_repaired = True
+                    source_time_method = ""
             candidate_state = {
                 "level": level,
                 "breaking": bool(raw_state.get("breaking")),
@@ -796,6 +815,7 @@ class NewsProcessor:
                 "last_seen_seq": _safe_nonnegative_int(raw_state.get("last_seen_seq", 0)),
                 "translation_text": translation_text,
                 "telegram_source_time": delivered_source_time,
+                "source_time_method": source_time_method,
             }
             if not isinstance(candidate_state["telegram_mode"], str) or candidate_state["telegram_mode"] not in {"classic", "rich"}:
                 logger.warning(f"Discard invalid Telegram mode news_id={nid}")
@@ -1471,7 +1491,9 @@ class NewsProcessor:
 
     async def _refresh_source_time(self, nid: str, state: Dict[str, Any]) -> None:
         """Re-render the footer in place after upstream corrects a published source time."""
-        message_id = state.get("telegram_message_id")
+        message_id = _safe_nonnegative_int(state.get("telegram_message_id"))
+        if not message_id:
+            return
         source_time = state["source_time"]
         translation_applied = state.get("translation_status") == "applied"
         translated = _safe_string(state.get("translation_text"))
@@ -1590,6 +1612,23 @@ class NewsProcessor:
             )
             return
         source_method = ws_method or source
+        source_time_changed = old is None or old_source_time != content["source_time"]
+        source_time_accepted = source_time_changed
+        if (
+            old is not None
+            and source_time_changed
+            and _rejects_source_time(
+                _safe_string(old.get("source_time_method")), source_method
+            )
+        ):
+            logger.info(
+                f"Reject source time overwrite news_id={_safe_log_text(nid, 128)} "
+                f"source_time={_safe_log_text(content['source_time'], 64)} "
+                f"accepted_method={_safe_log_text(_safe_string(old.get('source_time_method')), 64)} "
+                f"incoming_method={_safe_log_text(source_method, 64)}"
+            )
+            content["source_time"] = old_source_time
+            source_time_accepted = False
         metadata_changed = bool(
             old is not None
             and (
@@ -1612,6 +1651,11 @@ class NewsProcessor:
             "revision": next_revision,
             **content,
             "source_method": source_method,
+            "source_time_method": (
+                source_method
+                if source_time_accepted
+                else _safe_string(old.get("source_time_method")) if old is not None else ""
+            ),
         }
         archive_candidates: Dict[str, Dict[str, Any]] = {}
         if content_changed:
@@ -1653,6 +1697,7 @@ class NewsProcessor:
                     "breaking_archive_pending": [], "pending_group": None,
                     "pending_rich": None,
                     "translation_text": "", "telegram_source_time": "",
+                    "source_time_method": source_method,
                     "last_seen_seq": self._last_seen_seq + 1,
                 }
                 simulated[nid] = simulated_state
@@ -1719,6 +1764,8 @@ class NewsProcessor:
             state["breaking"] = breaking
             state["source_method"] = source_method
             state["source_time"] = content["source_time"]
+            if source_time_accepted:
+                state["source_time_method"] = source_method
             state["eurl"] = content["eurl"]
             if upgraded:
                 state["prefix"] = "🔺 UPGRADED\n"

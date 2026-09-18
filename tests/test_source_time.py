@@ -284,6 +284,98 @@ class SourceTimeCorrectionTests(unittest.IsolatedAsyncioTestCase):
             "05:55:04 01 September 2026", processor._state["1"]["telegram_source_time"]
         )
 
+    async def test_feedmain_replay_does_not_overwrite_feed_all_source_time(self):
+        edit = AsyncMock(return_value=True)
+        with patch(
+            "src.core.news_processor.tg_send_group", new=AsyncMock(return_value=[101])
+        ), patch("src.core.news_processor.tg_edit_message", new=edit):
+            processor = NewsProcessor(state_path=self.state_path)
+            await processor.process([
+                item(
+                    DatePublished="2026-09-01T11:03:00Z",
+                    __ws_channel__="feedmain:lite_rid:0",
+                )
+            ])
+            await processor.process([
+                item(DatePublished="2026-09-01T11:00:00Z", __ws_channel__="feed:all")
+            ])
+            edit.reset_mock()
+            await processor.process([
+                item(
+                    DatePublished="2026-09-01T11:03:00Z",
+                    __ws_channel__="feedmain:lite_rid:0",
+                )
+            ])
+
+        edit.assert_not_awaited()
+        self.assertEqual("07:00:00 01 September 2026", processor._state["1"]["source_time"])
+        self.assertEqual("feed:all", processor._state["1"]["source_time_method"])
+
+    async def test_feed_all_can_correct_its_own_source_time(self):
+        edit = AsyncMock(return_value=True)
+        with patch(
+            "src.core.news_processor.tg_send_group", new=AsyncMock(return_value=[101])
+        ), patch("src.core.news_processor.tg_edit_message", new=edit):
+            processor = NewsProcessor(state_path=self.state_path)
+            await processor.process([
+                item(DatePublished="2026-09-01T11:02:00Z", __ws_channel__="feed:all")
+            ])
+            await processor.process([
+                item(DatePublished="2026-09-01T11:00:00Z", __ws_channel__="feed:all")
+            ])
+
+        edit.assert_awaited_once()
+        self.assertEqual("07:00:00 01 September 2026", processor._state["1"]["source_time"])
+        self.assertEqual("feed:all", processor._state["1"]["source_time_method"])
+
+    async def test_feed_all_upgrades_feedmain_source_time(self):
+        edit = AsyncMock(return_value=True)
+        with patch(
+            "src.core.news_processor.tg_send_group", new=AsyncMock(return_value=[101])
+        ), patch("src.core.news_processor.tg_edit_message", new=edit):
+            processor = NewsProcessor(state_path=self.state_path)
+            await processor.process([
+                item(
+                    DatePublished="2026-09-01T11:03:00Z",
+                    __ws_channel__="feedmain:lite_rid:0",
+                )
+            ])
+            await processor.process([
+                item(DatePublished="2026-09-01T11:00:00Z", __ws_channel__="feed:all")
+            ])
+
+        edit.assert_awaited_once()
+        self.assertEqual("07:00:00 01 September 2026", processor._state["1"]["source_time"])
+        self.assertEqual("feed:all", processor._state["1"]["source_time_method"])
+
+    async def test_source_time_method_round_trip_and_legacy_default(self):
+        with patch(
+            "src.core.news_processor.tg_send_group", new=AsyncMock(return_value=[101])
+        ), patch("src.core.news_processor.tg_edit_message", new=AsyncMock(return_value=True)):
+            processor = NewsProcessor(state_path=self.state_path)
+            await processor.process([
+                item(DatePublished="2026-09-01T11:00:00Z", __ws_channel__="feed:all")
+            ])
+
+        reloaded = NewsProcessor(state_path=self.state_path)
+        self.assertEqual("feed:all", reloaded._state["1"]["source_time_method"])
+
+        with open(self.state_path, encoding="utf-8") as state_file:
+            persisted = json.load(state_file)
+        persisted["entries"]["1"].pop("source_time_method")
+        with open(self.state_path, "w", encoding="utf-8") as state_file:
+            json.dump(persisted, state_file)
+
+        edit = AsyncMock(return_value=True)
+        with patch("src.core.news_processor.tg_edit_message", new=edit):
+            legacy_reloaded = NewsProcessor(state_path=self.state_path)
+            await legacy_reloaded.process([
+                item(DatePublished="2026-09-01T11:00:00Z", __ws_channel__="feed:all")
+            ])
+
+        self.assertEqual("feed:all", legacy_reloaded._state["1"]["source_time_method"])
+        edit.assert_not_awaited()
+
 
 if __name__ == "__main__":
     unittest.main()
